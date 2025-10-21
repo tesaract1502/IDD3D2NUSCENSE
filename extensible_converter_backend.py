@@ -233,6 +233,86 @@ class IDD3DLidarConverter(BaseConverter):
         log_handler.log(f"✓ LiDAR conversion complete: {converted} converted, {placeholders} placeholders", 'success')
 
 
+class IDD3DCameraConverter(BaseConverter):
+    """Convert IDD3D camera images from PNG to JPEG (nuScenes format)"""
+    
+    def __init__(self):
+        super().__init__('camera')
+    
+    def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
+        try:
+            from PIL import Image
+            use_pil = True
+        except ImportError:
+            use_pil = False
+            log_handler.log("⚠ PIL/Pillow not available, skipping camera conversion", 'warning')
+            return
+        
+        camera_dir = os.path.join(data_loader.seq_base, 'camera')
+        if not os.path.exists(camera_dir):
+            log_handler.log("No camera directory found", 'warning')
+            return
+        
+        # Camera mapping for nuScenes
+        camera_channels = ['cam0', 'cam1', 'cam2', 'cam3', 'cam4', 'cam5']
+        nuscenes_cameras = {
+            'cam0': 'CAM_FRONT',
+            'cam1': 'CAM_FRONT_LEFT',
+            'cam2': 'CAM_FRONT_RIGHT',
+            'cam3': 'CAM_BACK_LEFT',
+            'cam4': 'CAM_BACK_RIGHT',
+            'cam5': 'CAM_BACK'
+        }
+        
+        # Create output directories for samples and sweeps
+        samples_dir = os.path.join(data_loader.out_data, 'samples')
+        sweeps_dir = os.path.join(data_loader.out_data, 'sweeps')
+        
+        converted = 0
+        errors = 0
+        
+        for cam_id in camera_channels:
+            cam_folder = os.path.join(camera_dir, cam_id)
+            if not os.path.exists(cam_folder):
+                continue
+            
+            nuscenes_cam_name = nuscenes_cameras[cam_id]
+            
+            # Create output directories
+            sample_cam_dir = os.path.join(samples_dir, nuscenes_cam_name)
+            sweep_cam_dir = os.path.join(sweeps_dir, nuscenes_cam_name)
+            os.makedirs(sample_cam_dir, exist_ok=True)
+            os.makedirs(sweep_cam_dir, exist_ok=True)
+            
+            # Get all PNG files
+            png_files = sorted([f for f in os.listdir(cam_folder) if f.lower().endswith('.png')])
+            
+            for idx, fname in enumerate(png_files):
+                src_path = os.path.join(cam_folder, fname)
+                base_name = os.path.splitext(fname)[0]
+                
+                # First 10% go to samples, rest to sweeps (following nuScenes convention)
+                if idx < len(png_files) * 0.1:
+                    dst_path = os.path.join(sample_cam_dir, base_name + '.jpg')
+                else:
+                    dst_path = os.path.join(sweep_cam_dir, base_name + '.jpg')
+                
+                try:
+                    if use_pil:
+                        img = Image.open(src_path)
+                        # Convert to RGB if needed
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        # Save as JPEG with quality 95 (nuScenes standard)
+                        img.save(dst_path, 'JPEG', quality=95)
+                        converted += 1
+                except Exception as e:
+                    errors += 1
+                    log_handler.log(f"Error converting {fname}: {str(e)}", 'error')
+        
+        log_handler.log(f"✓ Camera conversion complete: {converted} images converted, {errors} errors", 'success')
+
+
 class IDD3DCalibConverter(BaseConverter):
     """Generate calibration stubs for IDD3D"""
     
@@ -383,6 +463,8 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
     
     if conversions.get('lidar', False):
         pipeline.add_converter(IDD3DLidarConverter())
+    if conversions.get('camera', False):
+        pipeline.add_converter(IDD3DCameraConverter())
     if conversions.get('calib', False):
         pipeline.add_converter(IDD3DCalibConverter())
     if conversions.get('annot', False):
@@ -508,5 +590,5 @@ if __name__ == '__main__':
     print("Registered conversions:")
     for conv in ConverterRegistry.get_available_conversions():
         print(f"  {conv['source']} → {conv['target']}")
-    print("\nServer running on http://localhost:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    print("\nServer running on http://localhost:5001")
+    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)

@@ -25,6 +25,18 @@
 
         .header {
             margin-bottom: 32px;
+            display: flex;
+            align-items: center;
+            gap: 24px;
+        }
+
+        .logo {
+            width: 120px;
+            height: auto;
+        }
+
+        .header-text {
+            flex: 1;
         }
 
         .header h1 {
@@ -311,8 +323,11 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>Dataset Converter</h1>
-            <p>Convert between autonomous driving dataset formats</p>
+            <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" alt="KPIT Logo" class="logo" id="companyLogo">
+            <div class="header-text">
+                <h1>Dataset Converter</h1>
+                <p>Convert between autonomous driving dataset formats</p>
+            </div>
         </div>
 
         <div class="grid">
@@ -352,7 +367,7 @@
 
                 <!-- Paths -->
                 <div class="card">
-                    <h2>📁 Paths</h2>
+                    <h2>Paths</h2>
                     <div class="form-group">
                         <label>Root Directory</label>
                         <input type="text" id="rootPath" value="/home/siddharthb9/Desktop/nuSceneses&IDD3D">
@@ -361,7 +376,7 @@
                         <label>Sequence ID</label>
                         <input type="text" id="sequenceId" value="20220118103308_seq_10">
                     </div>
-                    <button class="button secondary" id="validateBtn" onclick="validatePaths()">🔄 Validate Paths</button>
+                    <button class="button secondary" id="validateBtn" onclick="validatePaths()">Validate Paths</button>
                     <div id="validationResult" style="margin-top: 12px;"></div>
                 </div>
             </div>
@@ -380,6 +395,13 @@
                             </div>
                         </label>
                         <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="camera" checked>
+                            <div class="checkbox-label">
+                                <p>Camera Conversion</p>
+                                <p>Convert PNG to JPEG</p>
+                            </div>
+                        </label>
+                        <label class="checkbox-item checked">
                             <input type="checkbox" name="conv" value="calib" checked>
                             <div class="checkbox-label">
                                 <p>Calibration Stubs</p>
@@ -391,20 +413,6 @@
                             <div class="checkbox-label">
                                 <p>Annotations</p>
                                 <p>Convert frame annotations</p>
-                            </div>
-                        </label>
-                        <label class="checkbox-item disabled">
-                            <input type="checkbox" name="conv" value="maps" disabled>
-                            <div class="checkbox-label">
-                                <p>Maps (Disabled)</p>
-                                <p>Generate HD maps - unavailable</p>
-                            </div>
-                        </label>
-                        <label class="checkbox-item disabled">
-                            <input type="checkbox" name="conv" value="egoPose" disabled>
-                            <div class="checkbox-label">
-                                <p>Ego Pose (Disabled)</p>
-                                <p>Generate ego trajectory - unavailable</p>
                             </div>
                         </label>
                     </div>

@@ -264,8 +264,7 @@ class IDD3DCameraConverter(BaseConverter):
             'cam5': 'CAM_BACK'
         }
         
-        # Create output directories for samples and sweeps
-        samples_dir = os.path.join(data_loader.out_data, 'samples')
+        # Create output directory for sweeps only
         sweeps_dir = os.path.join(data_loader.out_data, 'sweeps')
         
         converted = 0
@@ -278,24 +277,17 @@ class IDD3DCameraConverter(BaseConverter):
             
             nuscenes_cam_name = nuscenes_cameras[cam_id]
             
-            # Create output directories
-            sample_cam_dir = os.path.join(samples_dir, nuscenes_cam_name)
+            # Create output directory for this camera in sweeps
             sweep_cam_dir = os.path.join(sweeps_dir, nuscenes_cam_name)
-            os.makedirs(sample_cam_dir, exist_ok=True)
             os.makedirs(sweep_cam_dir, exist_ok=True)
             
             # Get all PNG files
             png_files = sorted([f for f in os.listdir(cam_folder) if f.lower().endswith('.png')])
             
-            for idx, fname in enumerate(png_files):
+            for fname in png_files:
                 src_path = os.path.join(cam_folder, fname)
                 base_name = os.path.splitext(fname)[0]
-                
-                # First 10% go to samples, rest to sweeps (following nuScenes convention)
-                if idx < len(png_files) * 0.1:
-                    dst_path = os.path.join(sample_cam_dir, base_name + '.jpg')
-                else:
-                    dst_path = os.path.join(sweep_cam_dir, base_name + '.jpg')
+                dst_path = os.path.join(sweep_cam_dir, base_name + '.jpg')
                 
                 try:
                     if use_pil:
@@ -310,7 +302,7 @@ class IDD3DCameraConverter(BaseConverter):
                     errors += 1
                     log_handler.log(f"Error converting {fname}: {str(e)}", 'error')
         
-        log_handler.log(f"✓ Camera conversion complete: {converted} images converted, {errors} errors", 'success')
+        log_handler.log(f"✓ Camera conversion complete: {converted} images converted to sweeps, {errors} errors", 'success')
 
 
 class IDD3DCalibConverter(BaseConverter):

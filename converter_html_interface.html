@@ -112,7 +112,7 @@
         .form-group input:focus,
         .form-group select:focus {
             outline: none;
-            ring: 2px;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
             border-color: #3b82f6;
         }
 
@@ -413,6 +413,27 @@
                             <div class="checkbox-label">
                                 <p>Annotations</p>
                                 <p>Convert frame annotations</p>
+                            </div>
+                        </label>
+                        <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="scene" checked>
+                            <div class="checkbox-label">
+                                <p>Scene</p>
+                                <p>Generate scene structure</p>
+                            </div>
+                        </label>
+                        <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="sample" checked>
+                            <div class="checkbox-label">
+                                <p>Sample</p>
+                                <p>Build sample sequence</p>
+                            </div>
+                        </label>
+                        <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="sample_annotation" checked>
+                            <div class="checkbox-label">
+                                <p>Sample Annotation</p>
+                                <p>Create object annotations</p>
                             </div>
                         </label>
                     </div>

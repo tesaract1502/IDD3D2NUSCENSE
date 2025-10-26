@@ -752,3 +752,215 @@ class IDD3DTimestampSyncConverter(BaseConverter):
                     frame_id = sample['token']
                     if frame_id in timestamp_map:
                         sample['timestamp'] = timestamp_map[frame_id]
+                
+                with open(sample_path, 'w') as f:
+                    json.dump(samples, f, indent=2)
+                
+                log_handler.log("✓ Updated timestamps in sample.json", 'success')
+            except Exception as e:
+                log_handler.log(f"Error updating sample.json timestamps: {str(e)}", 'warning')
+        
+        # Update frames.json with synced timestamps (if it exists)
+        frames_path = os.path.join(data_loader.annot_out, 'frames.json')
+        if os.path.exists(frames_path):
+            try:
+                with open(frames_path, 'r') as f:
+                    frames = json.load(f)
+                
+                for frame in frames:
+                    frame_id = frame['frame_id']
+                    if frame_id in timestamp_map:
+                        frame['timestamp'] = timestamp_map[frame_id]
+                
+                with open(frames_path, 'w') as f:
+                    json.dump(frames, f, indent=2)
+                
+                log_handler.log("✓ Updated timestamps in frames.json", 'success')
+            except Exception as e:
+                log_handler.log(f"Error updating frames.json timestamps: {str(e)}", 'warning')
+        
+        log_handler.log("✓ Timestamp synchronization complete", 'success')
+
+
+# ============================================================================
+# CONVERTER REGISTRY - Easy to add new datasets
+# ============================================================================
+
+class ConverterRegistry:
+    """Registry for dataset conversions"""
+    
+    _conversions = {}
+    
+    @classmethod
+    def register(cls, source: str, target: str, pipeline_builder):
+        """Register a conversion pipeline. pipeline_builder is a callable that returns a DatasetConversionPipeline"""
+        key = (source, target)
+        cls._conversions[key] = pipeline_builder
+    
+    @classmethod
+    def get_pipeline(cls, source: str, target: str, config: dict):
+        """Get a pipeline for source->target conversion"""
+        key = (source, target)
+        if key not in cls._conversions:
+            raise ValueError(f"No conversion registered for {source} -> {target}")
+        pipeline_builder = cls._conversions[key]
+        return pipeline_builder(config)
+    
+    @classmethod
+    def get_available_conversions(cls):
+        """Get all available conversions"""
+        return [{'source': s, 'target': t} for s, t in cls._conversions.keys()]
+
+
+# ============================================================================
+# REGISTER CONVERSIONS
+# ============================================================================
+
+def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
+    """Build conversion pipeline for IDD3D -> nuScenes"""
+    pipeline = DatasetConversionPipeline('idd3d', 'nuscenes')
+    
+    conversions = config.get('conversions', {})
+    sequence_name = config.get('sequence_id', 'seq_10')
+    
+    if conversions.get('lidar', False):
+        pipeline.add_converter(IDD3DLidarConverter())
+    if conversions.get('camera', False):
+        pipeline.add_converter(IDD3DCameraConverter())
+    if conversions.get('calib', False):
+        pipeline.add_converter(IDD3DCalibConverter())
+    if conversions.get('annot', False):
+        pipeline.add_converter(IDD3DAnnotationConverter(sequence_name))
+    if conversions.get('scene', False):
+        pipeline.add_converter(IDD3DSceneConverter(sequence_name))
+    if conversions.get('sample', False):
+        pipeline.add_converter(IDD3DSampleConverter(sequence_name))
+    if conversions.get('sample_annotation', False):
+        pipeline.add_converter(IDD3DSampleAnnotationConverter(sequence_name))
+    if conversions.get('category', False):
+        pipeline.add_converter(IDD3DCategoryConverter())
+    
+    # Always run timestamp sync at the end to ensure consistency
+    pipeline.add_converter(IDD3DTimestampSyncConverter())
+    
+    return pipeline
+
+
+# Register the conversion AFTER the function is defined
+ConverterRegistry.register('idd3d', 'nuscenes', build_idd3d_to_nuscenes_pipeline)
+
+
+# ============================================================================
+# FLASK API ENDPOINTS
+# ============================================================================
+
+@app.route('/api/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'healthy', 'service': 'Dataset Converter API'})
+
+
+@app.route('/api/conversions', methods=['GET'])
+def get_conversions():
+    """Get all available conversions"""
+    conversions = ConverterRegistry.get_available_conversions()
+    return jsonify({'conversions': conversions})
+
+
+@app.route('/api/validate-paths', methods=['POST'])
+def validate_paths():
+    """Validate dataset paths"""
+    data = request.json
+    source = data.get('source', 'idd3d')
+    root_path = data.get('root_path')
+    sequence_id = data.get('sequence_id', '20220118103308_seq_10')
+    
+    if not root_path or not os.path.exists(root_path):
+        return jsonify({'valid': False, 'error': f'Root path does not exist: {root_path}'}), 400
+    
+    if source == 'idd3d':
+        loader = IDD3DDataLoader(root_path, sequence_id)
+        validation = loader.validate()
+        return jsonify(validation)
+    
+    return jsonify({'valid': False, 'error': f'Unknown source dataset: {source}'}), 400
+
+
+@app.route('/api/convert/stream', methods=['POST'])
+def convert_stream():
+    """Start conversion and stream logs via SSE"""
+    with conversion_lock:
+        if conversion_state['active']:
+            return jsonify({'error': 'Conversion already in progress'}), 409
+        conversion_state['active'] = True
+    
+    data = request.json
+    source = data.get('source', 'idd3d')
+    target = data.get('target', 'nuscenes')
+    root_path = data.get('root_path')
+    sequence_id = data.get('sequence_id', '20220118103308_seq_10')
+    conversions = data.get('conversions', {})
+    
+    def generate():
+        try:
+            while not conversion_state['logs'].empty():
+                conversion_state['logs'].get()
+            
+            log_handler = LogHandler(conversion_state['logs'])
+            
+            log_handler.log(f"Starting conversion: {source} → {target}", 'info')
+            log_handler.log(f"Root path: {root_path}", 'info')
+            log_handler.log(f"Sequence ID: {sequence_id}", 'info')
+            
+            # Create data loader
+            if source == 'idd3d':
+                loader = IDD3DDataLoader(root_path, sequence_id)
+            else:
+                raise ValueError(f"Unknown source dataset: {source}")
+            
+            loader.ensure_output_dirs()
+            
+            # Build and run pipeline
+            pipeline = ConverterRegistry.get_pipeline(
+                source, target,
+                {'conversions': conversions, 'sequence_id': sequence_id}
+            )
+            conversion_state['total_steps'] = len(pipeline.converters)
+            
+            if conversion_state['total_steps'] == 0:
+                log_handler.log("No conversion modules selected", 'warning')
+            else:
+                pipeline.run(loader, log_handler)
+                log_handler.log("✓ Conversion pipeline completed successfully!", 'success')
+                log_handler.log(f"Output directory: {root_path}/Intermediate_format/", 'info')
+        
+        except Exception as e:
+            log_handler.log(f"✗ Conversion failed: {str(e)}", 'error')
+            import traceback
+            log_handler.log(traceback.format_exc(), 'error')
+        
+        finally:
+            conversion_state['active'] = False
+            while not conversion_state['logs'].empty():
+                log_entry = conversion_state['logs'].get()
+                yield f"data: {json.dumps(log_entry)}\n\n"
+            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+    
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
+    )
+
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Endpoint not found'}), 404
+
+
+if __name__ == '__main__':
+    print("Starting Extensible Dataset Converter API...")
+    print("Registered conversions:")
+    for conv in ConverterRegistry.get_available_conversions():
+        print(f"  {conv['source']} → {conv['target']}")
+    print("\nServer running on http://localhost:5001")
+    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)

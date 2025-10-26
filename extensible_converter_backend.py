@@ -1,4 +1,241 @@
-"""
+# Register the conversion
+ConverterRegistry.register('idd3d', 'nuscenes', build_idd3d_to_nuscenes_pipeline)
+
+
+# ============================================================================
+# EXAMPLE: HOW TO ADD A NEW DATASET (e.g., KITTI -> nuScenes)
+# ============================================================================
+'''
+Step 1: Create a DataLoader for your new dataset
+
+class KITTIDataLoader(BaseDataLoader):
+    """Loader for KITTI dataset"""
+    
+    def __init__(self, root: str, sequence: str = '0000'):
+        super().__init__(root, sequence)
+        # Define paths specific to KITTI structure
+        self.seq_base = os.path.join(self.root, 'sequences', sequence)
+        self.velodyne_dir = os.path.join(self.seq_base, 'velodyne')
+        self.image_dir = os.path.join(self.seq_base, 'image_2')
+        self.label_dir = os.path.join(self.seq_base, 'labels')
+        self.calib_file = os.path.join(self.seq_base, 'calib.txt')
+        
+        # Define output directories
+        self.out_data = os.path.join(self.root, 'Intermediate_format/data')
+        self.annot_out = os.path.join(self.root, 'Intermediate_format/annotations')
+        self.converted_lidar = os.path.join(self.out_data, 'converted_lidar')
+    
+    def ensure_output_dirs(self):
+        """Create necessary output directories"""
+        os.makedirs(self.out_data, exist_ok=True)
+        os.makedirs(self.annot_out, exist_ok=True)
+        os.makedirs(self.converted_lidar, exist_ok=True)
+    
+    def validate(self) -> dict:
+        """Validate that KITTI dataset structure exists"""
+        if not os.path.exists(self.seq_base):
+            return {'valid': False, 'error': f'Sequence path not found: {self.seq_base}'}
+        
+        # Check for required directories
+        required_dirs = ['velodyne', 'image_2']
+        missing = []
+        for dir_name in required_dirs:
+            dir_path = os.path.join(self.seq_base, dir_name)
+            if not os.path.exists(dir_path):
+                missing.append(dir_name)
+        
+        if missing:
+            return {'valid': False, 'error': f'Missing directories: {", ".join(missing)}'}
+        
+        # Count files
+        velodyne_count = len([f for f in os.listdir(self.velodyne_dir) 
+                             if f.endswith('.bin')])
+        image_count = len([f for f in os.listdir(self.image_dir) 
+                          if f.endswith('.png')])
+        
+        return {
+            'valid': True,
+            'path': self.seq_base,
+            'lidar_files': velodyne_count,
+            'image_files': image_count
+        }
+    
+    def list_lidar_files(self):
+        """Get list of KITTI velodyne files"""
+        if not os.path.exists(self.velodyne_dir):
+            return []
+        return sorted([os.path.join(self.velodyne_dir, f) 
+                      for f in os.listdir(self.velodyne_dir) if f.endswith('.bin')])
+'''
+
+'''
+Step 2: Create Converters for specific tasks
+
+class KITTILidarConverter(BaseConverter):
+    """Convert KITTI LiDAR format to nuScenes format"""
+    
+    def __init__(self):
+        super().__init__('kitti_lidar')
+    
+    def run(self, data_loader: KITTIDataLoader, log_handler: LogHandler):
+        try:
+            import numpy as np
+            use_np = True
+        except ImportError:
+            use_np = False
+            log_handler.log("⚠ numpy not available", 'warning')
+            return
+        
+        lidar_files = data_loader.list_lidar_files()
+        if not lidar_files:
+            log_handler.log("No LiDAR files found", 'warning')
+            return
+        
+        dst_dir = data_loader.converted_lidar
+        os.makedirs(dst_dir, exist_ok=True)
+        
+        converted = 0
+        for src_path in lidar_files:
+            filename = os.path.basename(src_path)
+            dst_path = os.path.join(dst_dir, filename)
+            
+            try:
+                # KITTI format: x, y, z, intensity (already in .bin format)
+                # If format matches nuScenes, just copy
+                # If different, convert here
+                points = np.fromfile(src_path, dtype=np.float32).reshape(-1, 4)
+                points.tofile(dst_path)
+                converted += 1
+            except Exception as e:
+                log_handler.log(f"Error converting {filename}: {str(e)}", 'error')
+        
+        log_handler.log(f"✓ KITTI LiDAR conversion complete: {converted} files", 'success')
+
+
+class KITTICameraConverter(BaseConverter):
+    """Convert KITTI camera images to nuScenes format"""
+    
+    def __init__(self):
+        super().__init__('kitti_camera')
+    
+    def run(self, data_loader: KITTIDataLoader, log_handler: LogHandler):
+        try:
+            from PIL import Image
+            use_pil = True
+        except ImportError:
+            use_pil = False
+            log_handler.log("⚠ PIL/Pillow not available", 'warning')
+            return
+        
+        if not os.path.exists(data_loader.image_dir):
+            log_handler.log("No image directory found", 'warning')
+            return
+        
+        # Create output directory
+        sweeps_dir = os.path.join(data_loader.out_data, 'sweeps/CAM_FRONT')
+        os.makedirs(sweeps_dir, exist_ok=True)
+        
+        image_files = sorted([f for f in os.listdir(data_loader.image_dir) 
+                             if f.lower().endswith('.png')])
+        
+        converted = 0
+        for fname in image_files:
+            src_path = os.path.join(data_loader.image_dir, fname)
+            base_name = os.path.splitext(fname)[0]
+            dst_path = os.path.join(sweeps_dir, base_name + '.jpg')
+            
+            try:
+                img = Image.open(src_path)
+                if img.mode != 'RGB':
+                    img = img.convert('RGB')
+                img.save(dst_path, 'JPEG', quality=95)
+                converted += 1
+            except Exception as e:
+                log_handler.log(f"Error converting {fname}: {str(e)}", 'error')
+        
+        log_handler.log(f"✓ KITTI camera conversion complete: {converted} images", 'success')
+'''
+
+'''
+Step 3: Create a pipeline builder function
+
+def build_kitti_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
+    """Build conversion pipeline for KITTI -> nuScenes"""
+    pipeline = DatasetConversionPipeline('kitti', 'nuscenes')
+    
+    conversions = config.get('conversions', {})
+    
+    # Add converters based on user selection
+    if conversions.get('lidar', False):
+        pipeline.add_converter(KITTILidarConverter())
+    
+    if conversions.get('camera', False):
+        pipeline.add_converter(KITTICameraConverter())
+    
+    # You can reuse converters from other datasets if format is compatible
+    if conversions.get('calib', False):
+        # If KITTI calibration format is different, create KITTICalibConverter
+        # If similar to IDD3D, you can reuse:
+        pipeline.add_converter(IDD3DCalibConverter())
+    
+    return pipeline
+'''
+
+'''
+Step 4: Register the new conversion
+# Uncomment this line after creating all the classes above:
+# ConverterRegistry.register('kitti', 'nuscenes', build_kitti_to_nuscenes_pipeline)
+'''
+
+'''
+Step 5: Update the validate_paths endpoint in Flask API
+Add a new elif block in the validate_paths() function:
+
+elif source == 'kitti':
+    loader = KITTIDataLoader(root_path, sequence_id)
+    validation = loader.validate()
+    return jsonify(validation)
+'''
+
+'''
+Step 6: Update the HTML interface
+Add KITTI option to the source dataset dropdown:
+
+<select id="sourceDataset">
+    <option value="idd3d">IDD3D</option>
+    <option value="kitti">KITTI</option>
+</select>
+
+And update the datasets object in JavaScript:
+
+const datasets = {
+    idd3d: { ... },
+    kitti: {
+        name: 'KITTI Dataset',
+        description: 'Velodyne LiDAR, cameras - 10Hz',
+        sensors: 'Velodyne HDL-64E, 4 cameras',
+        format: 'BIN (lidar), PNG (camera)'
+    },
+    nuscenes: { ... }
+};
+'''
+
+'''
+SUMMARY OF STEPS TO ADD NEW DATASET:
+=====================================
+1. Create YourDatasetLoader(BaseDataLoader) - handles paths and validation
+2. Create YourDatasetXConverter(BaseConverter) for each conversion type
+3. Create build_yourdataset_to_target_pipeline(config) function
+4. Register with ConverterRegistry.register('yourdataset', 'target', builder)
+5. Add validation logic in Flask API's validate_paths() endpoint
+6. Update HTML interface to include new dataset in dropdown
+7. Test the conversion!
+
+You can mix and match converters from different datasets. For example:
+- Use IDD3DCalibConverter for KITTI if calibration format is similar
+- Use KITTILidarConverter but IDD3DCameraConverter
+- Create custom converters only for dataset-specific formats
+'''"""
 Extensible Flask backend for Dataset Converter UI
 Supports multiple dataset conversions via pluggable converter classes
 """
@@ -423,15 +660,24 @@ class IDD3DSceneConverter(BaseConverter):
     def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
         import uuid
         
-        annot_data = data_loader.read_annotations()
-        if not annot_data:
-            log_handler.log("No annotations found for scene conversion", 'warning')
+        # Iterate through labels folder to get all frame IDs
+        if not os.path.exists(data_loader.label_dir):
+            log_handler.log("Labels directory not found", 'warning')
             return
         
-        frame_ids = sorted(annot_data.keys())
-        if not frame_ids:
-            log_handler.log("No frames found", 'warning')
+        # Get all label files (01000.json, 01001.json, etc.)
+        label_files = sorted([f for f in os.listdir(data_loader.label_dir) 
+                             if f.lower().endswith('.json')])
+        
+        if not label_files:
+            log_handler.log("No label files found in labels folder", 'warning')
             return
+        
+        # Extract frame IDs from filenames (e.g., "01000.json" -> "01000")
+        frame_ids = [os.path.splitext(f)[0] for f in label_files]
+        
+        log_handler.log(f"Found {len(frame_ids)} label files in labels folder", 'info')
+        log_handler.log(f"Frame range: {frame_ids[0]} to {frame_ids[-1]}", 'info')
         
         # Generate tokens
         scene_token = uuid.uuid4().hex
@@ -439,12 +685,7 @@ class IDD3DSceneConverter(BaseConverter):
         first_sample_token = frame_ids[0]
         last_sample_token = frame_ids[-1]
         
-        # Get session info from first frame
-        first_frame_data = annot_data[frame_ids[0]]
-        session_id = first_frame_data.get('session_id', 'unknown_session')
-        bag_id = first_frame_data.get('bag_id', 'unknown_bag')
-        
-        # Create scene object
+        # Create scene object with all frames from labels folder
         scene = {
             "token": scene_token,
             "log_token": log_token,
@@ -454,12 +695,12 @@ class IDD3DSceneConverter(BaseConverter):
             "name": f"scene-{self.sequence_name}"
         }
         
-        # Save scene.json
+        # Save scene.json as a list (nuScenes format is an array of scenes)
         out_path = os.path.join(data_loader.annot_out, 'scene.json')
         with open(out_path, 'w') as f:
             json.dump([scene], f, indent=2)
         
-        log_handler.log(f"✓ Scene file created with {len(frame_ids)} samples", 'success')
+        log_handler.log(f"✓ Scene created: {len(frame_ids)} samples ({first_sample_token} to {last_sample_token})", 'success')
 
 
 class IDD3DSampleConverter(BaseConverter):
@@ -638,6 +879,146 @@ class IDD3DSampleAnnotationConverter(BaseConverter):
         log_handler.log(f"✓ Sample annotation file created with {len(sample_annotations)} annotations", 'success')
 
 
+class IDD3DCategoryConverter(BaseConverter):
+    """Generate nuScenes category.json from IDD3D object types"""
+    
+    def __init__(self):
+        super().__init__('category')
+    
+    def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
+        import uuid
+        
+        # IDD3D object types mapped to nuScenes-like categories
+        # Based on IDD3D's 17 classes
+        idd3d_to_nuscenes_categories = {
+            'Car': 'vehicle.car',
+            'Truck': 'vehicle.truck',
+            'Bus': 'vehicle.bus',
+            'Motorcycle': 'vehicle.motorcycle',
+            'Bicycle': 'vehicle.bicycle',
+            'Auto': 'vehicle.auto',
+            'Person': 'human.pedestrian.adult',
+            'Rider': 'human.pedestrian.rider',
+            'Animal': 'animal',
+            'TrafficLight': 'static_object.traffic_light',
+            'TrafficSign': 'static_object.traffic_sign',
+            'Pole': 'static_object.pole',
+            'OtherVehicle': 'vehicle.other',
+            'Misc': 'movable_object.debris'
+        }
+        
+        # Collect unique object types from all label files
+        unique_obj_types = set()
+        frame_ids = sorted(data_loader.read_annotations().keys())
+        
+        for frame_id in frame_ids:
+            label_path = os.path.join(data_loader.label_dir, f"{frame_id}.json")
+            if not os.path.exists(label_path):
+                continue
+            
+            try:
+                with open(label_path, 'r') as f:
+                    label_objects = json.load(f)
+                for obj in label_objects:
+                    obj_type = obj.get("obj_type")
+                    if obj_type:
+                        unique_obj_types.add(obj_type)
+            except Exception:
+                pass
+        
+        # Create category entries
+        categories = []
+        for obj_type in sorted(unique_obj_types):
+            # Map IDD3D type to nuScenes category name
+            category_name = idd3d_to_nuscenes_categories.get(obj_type, f'movable_object.{obj_type.lower()}')
+            
+            category = {
+                "token": uuid.uuid4().hex,
+                "name": category_name,
+                "description": f"{obj_type} category from IDD3D"
+            }
+            categories.append(category)
+        
+        # Save category.json
+        out_path = os.path.join(data_loader.annot_out, 'category.json')
+        with open(out_path, 'w') as f:
+            json.dump(categories, f, indent=2)
+        
+        log_handler.log(f"✓ Category file created with {len(categories)} categories", 'success')
+
+
+class IDD3DTimestampSyncConverter(BaseConverter):
+    """Synchronize timestamps across all JSON files"""
+    
+    def __init__(self):
+        super().__init__('timestamp_sync')
+    
+    def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
+        """
+        Ensure consistent timestamps across:
+        - sample.json
+        - frames.json (if exists)
+        - Any other files that need timestamps
+        """
+        annot_data = data_loader.read_annotations()
+        if not annot_data:
+            log_handler.log("No annotations found for timestamp sync", 'warning')
+            return
+        
+        frame_ids = sorted(annot_data.keys())
+        
+        # Create a timestamp mapping: frame_id -> timestamp
+        timestamp_map = {}
+        base_timestamp = 1532402927647951  # Example base timestamp (can be adjusted)
+        
+        for i, frame_id in enumerate(frame_ids):
+            # Generate consistent timestamp (100ms intervals = 10Hz)
+            timestamp = base_timestamp + (i * 100000)
+            timestamp_map[frame_id] = timestamp
+        
+        log_handler.log(f"Generated timestamps for {len(timestamp_map)} frames", 'info')
+        
+        # Update sample.json with synced timestamps
+        sample_path = os.path.join(data_loader.annot_out, 'sample.json')
+        if os.path.exists(sample_path):
+            try:
+                with open(sample_path, 'r') as f:
+                    samples = json.load(f)
+                
+                for sample in samples:
+                    frame_id = sample['token']
+                    if frame_id in timestamp_map:
+                        sample['timestamp'] = timestamp_map[frame_id]
+                
+                with open(sample_path, 'w') as f:
+                    json.dump(samples, f, indent=2)
+                
+                log_handler.log("✓ Updated timestamps in sample.json", 'success')
+            except Exception as e:
+                log_handler.log(f"Error updating sample.json timestamps: {str(e)}", 'warning')
+        
+        # Update frames.json with synced timestamps (if it exists)
+        frames_path = os.path.join(data_loader.annot_out, 'frames.json')
+        if os.path.exists(frames_path):
+            try:
+                with open(frames_path, 'r') as f:
+                    frames = json.load(f)
+                
+                for frame in frames:
+                    frame_id = frame['frame_id']
+                    if frame_id in timestamp_map:
+                        frame['timestamp'] = timestamp_map[frame_id]
+                
+                with open(frames_path, 'w') as f:
+                    json.dump(frames, f, indent=2)
+                
+                log_handler.log("✓ Updated timestamps in frames.json", 'success')
+            except Exception as e:
+                log_handler.log(f"Error updating frames.json timestamps: {str(e)}", 'warning')
+        
+        log_handler.log("✓ Timestamp synchronization complete", 'success')
+
+
 # ============================================================================
 # CONVERTER REGISTRY - Easy to add new datasets
 # ============================================================================
@@ -693,6 +1074,10 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
         pipeline.add_converter(IDD3DSampleConverter(sequence_name))
     if conversions.get('sample_annotation', False):
         pipeline.add_converter(IDD3DSampleAnnotationConverter(sequence_name))
+    if conversions.get('category', False):
+        pipeline.add_converter(IDD3DCategoryConverter())
+    if conversions.get('timestamp_sync', False):
+        pipeline.add_converter(IDD3DTimestampSyncConverter())
     
     return pipeline
 

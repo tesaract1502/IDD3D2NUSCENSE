@@ -413,59 +413,6 @@ class IDD3DAnnotationConverter(BaseConverter):
         log_handler.log(f"✓ Annotations converted ({len(frames)} frames)", 'success')
 
 
-class IDD3DSceneConverter(BaseConverter):
-    """Convert IDD3D sequence to nuScenes scene.json format"""
-    
-    def __init__(self, sequence_name: str = 'seq'):
-        super().__init__('scene')
-        self.sequence_name = sequence_name
-    
-    def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
-        import uuid
-        
-        # Iterate through labels folder to get all frame IDs
-        if not os.path.exists(data_loader.label_dir):
-            log_handler.log("Labels directory not found", 'warning')
-            return
-        
-        # Get all label files (01000.json, 01001.json, etc.)
-        label_files = sorted([f for f in os.listdir(data_loader.label_dir) 
-                             if f.lower().endswith('.json')])
-        
-        if not label_files:
-            log_handler.log("No label files found in labels folder", 'warning')
-            return
-        
-        # Extract frame IDs from filenames (e.g., "01000.json" -> "01000")
-        frame_ids = [os.path.splitext(f)[0] for f in label_files]
-        
-        log_handler.log(f"Found {len(frame_ids)} label files in labels folder", 'info')
-        log_handler.log(f"Frame range: {frame_ids[0]} to {frame_ids[-1]}", 'info')
-        
-        # Generate tokens
-        scene_token = uuid.uuid4().hex
-        log_token = uuid.uuid4().hex
-        first_sample_token = frame_ids[0]
-        last_sample_token = frame_ids[-1]
-        
-        # Create scene object with all frames from labels folder
-        scene = {
-            "token": scene_token,
-            "log_token": log_token,
-            "nbr_samples": len(frame_ids),
-            "first_sample_token": first_sample_token,
-            "last_sample_token": last_sample_token,
-            "name": f"scene-{self.sequence_name}"
-        }
-        
-        # Save scene.json as a list (nuScenes format is an array of scenes)
-        out_path = os.path.join(data_loader.annot_out, 'scene.json')
-        with open(out_path, 'w') as f:
-            json.dump([scene], f, indent=2)
-        
-        log_handler.log(f"✓ Scene created: {len(frame_ids)} samples ({first_sample_token} to {last_sample_token})", 'success')
-
-
 class IDD3DSampleConverter(BaseConverter):
     """Convert IDD3D frames to nuScenes sample.json format"""
     
@@ -831,8 +778,6 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
         pipeline.add_converter(IDD3DCalibConverter())
     if conversions.get('annot', False):
         pipeline.add_converter(IDD3DAnnotationConverter(sequence_name))
-    if conversions.get('scene', False):
-        pipeline.add_converter(IDD3DSceneConverter(sequence_name))
     if conversions.get('sample', False):
         pipeline.add_converter(IDD3DSampleConverter(sequence_name))
     if conversions.get('sample_annotation', False):

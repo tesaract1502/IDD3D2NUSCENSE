@@ -19,33 +19,13 @@ class IDD3DInstanceConverter(BaseConverter):
             except Exception:
                 pass
         
-        # Read sample_annotation.json to link annotations to instances
-        sample_annot_path = os.path.join(dataloader.annot_out, 'sample_annotation.json')
-        sample_annotations = []
-        if os.path.exists(sample_annot_path):
-            try:
-                with open(sample_annot_path, 'r') as f:
-                    sample_annotations = json.load(f)
-            except Exception:
-                pass
-        
-        # Read sample.json to get frame tokens
-        sample_path = os.path.join(dataloader.annot_out, 'sample.json')
-        samples = []
-        if os.path.exists(sample_path):
-            try:
-                with open(sample_path, 'r') as f:
-                    samples = json.load(f)
-            except Exception:
-                pass
-        
         # IDD3D to nuScenes category mapping
         idd3d_to_nuscenes_categories = {
             'Car': 'vehicle.car',
             'Truck': 'vehicle.truck',
             'Bus': 'vehicle.bus',
             'Motorcycle': 'vehicle.motorcycle',
-            'MotorcyleRider': 'vehicle.motorcycle',  # Handle typo in IDD3D
+            'MotorcyleRider': 'vehicle.motorcycle',
             'Bicycle': 'vehicle.bicycle',
             'Auto': 'vehicle.auto',
             'Person': 'human.pedestrian.adult',
@@ -58,19 +38,19 @@ class IDD3DInstanceConverter(BaseConverter):
             'Misc': 'movable_object.debris'
         }
         
-        # Read annotation data to get frame information
+        # Read annotation data
         annot_data = dataloader.read_annotations()
         if not annot_data:
             loghandler.log("No annotations found", "warning")
             return
         
         frame_ids = sorted(annot_data.keys())
-        loghandler.log(f"Processing {len(frame_ids)} frames (01000-01099)", "info")
+        loghandler.log(f"Processing {len(frame_ids)} frames", "info")
         
-        # Track unique instances across all frames
-        instance_tracker = {}  # obj_id -> {instance_token, category_token, annotations[], frames[]}
+        # Track unique instances: obj_id -> instance_data
+        instance_tracker = {}
         
-        # First pass: collect all unique objects and their annotations
+        # Process all frames (01000 to 01099)
         for frame_id in frame_ids:
             label_path = os.path.join(dataloader.label_dir, f'{frame_id}.json')
             if not os.path.exists(label_path):
@@ -88,59 +68,48 @@ class IDD3DInstanceConverter(BaseConverter):
                         continue
                     
                     if obj_id not in instance_tracker:
-                        # Generate instance token for this unique object
-                        instance_token = uuid.uuid4().hex
+                        # Generate instance token
+                        instance_token = f"instance_{obj_id}"
                         
                         # Get category token
                         category_name = idd3d_to_nuscenes_categories.get(
                             obj_type, 
                             f'movable_object.{obj_type.lower()}'
                         )
-                        category_token = category_map.get(category_name, uuid.uuid4().hex)
+                        category_token = category_map.get(category_name, f"cat_{obj_type}")
                         
                         instance_tracker[obj_id] = {
                             'instance_token': instance_token,
                             'category_token': category_token,
-                            'annotation_tokens': [],
-                            'frame_ids': []
+                            'first_frame': frame_id,
+                            'last_frame': frame_id,
+                            'first_annotation': f"obj_{obj_id}_{frame_id}",
+                            'last_annotation': f"obj_{obj_id}_{frame_id}"
                         }
-                    
-                    # Track frame appearance
-                    instance_tracker[obj_id]['frame_ids'].append(frame_id)
+                    else:
+                        # Update last frame and annotation
+                        instance_tracker[obj_id]['last_frame'] = frame_id
+                        instance_tracker[obj_id]['last_annotation'] = f"obj_{obj_id}_{frame_id}"
             
             except Exception as e:
                 loghandler.log(f"Error processing label {frame_id}: {str(e)}", "warning")
         
-        # Second pass: link sample_annotation tokens to instances
-        for annot in sample_annotations:
-            instance_token = annot.get('instance_token')
-            annot_token = annot.get('token')
-            
-            # Find matching instance by instance_token
-            for obj_id, data in instance_tracker.items():
-                if data['instance_token'] == instance_token:
-                    data['annotation_tokens'].append(annot_token)
-                    break
-        
-        # Create instance entries with all required fields
+        # Create instance entries matching the desired format
         instances = []
-        for obj_id, data in instance_tracker.items():
-            annotation_tokens = data['annotation_tokens']
-            frame_ids = data['frame_ids']
-            
+        for obj_id, data in sorted(instance_tracker.items()):
             instance = {
-                'token': data['instance_token'],
-                'category_token': data['category_token'],
-                'first_annotation_token': annotation_tokens[0] if annotation_tokens else '',
-                'last_annotation_token': annotation_tokens[-1] if annotation_tokens else '',
-                'first_frame_token': frame_ids[0] if frame_ids else '',
-                'last_frame_token': frame_ids[-1] if frame_ids else ''
+                "instance_token": data['instance_token'],
+                "category_token": data['category_token'],
+                "first_annotation_token": data['first_annotation'],
+                "last_annotation_token": data['last_annotation'],
+                "first_frame_token": f"frame_{data['first_frame']}",
+                "last_frame_token": f"frame_{data['last_frame']}"
             }
             instances.append(instance)
         
         # Save instance.json
         out_path = os.path.join(dataloader.annot_out, 'instance.json')
-        with open(out_path, 'w') as f:
+        with open(out_path, 'w', encoding='utf-8') as f:
             json.dump(instances, f, indent=2)
         
         loghandler.log(f"Instance file created with {len(instances)} instances", "success")

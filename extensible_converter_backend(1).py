@@ -1,5 +1,5 @@
 class IDD3DInstanceConverter(BaseConverter):
-    """Generate nuScenes instance.json using sweeps folder images"""
+    """Generate nuScenes instance.json using sweeps folder images - FIXED CATEGORY MAPPING"""
     
     def __init__(self):
         super().__init__("instance")
@@ -17,19 +17,32 @@ class IDD3DInstanceConverter(BaseConverter):
                     categories = json.load(f)
                     for cat in categories:
                         category_map[cat['name']] = cat['token']
-            except Exception:
-                pass
+                    loghandler.log(f"Loaded {len(category_map)} categories from category.json", "info")
+            except Exception as e:
+                loghandler.log(f"Error reading category.json: {str(e)}", "warning")
         
-        # Define sweeps directory structure
+        # IDD3D to nuScenes category mapping (MUST MATCH IDD3DCategoryConverter)
+        idd3d_to_nuscenes_categories = {
+            'Car': 'vehicle.car',
+            'Truck': 'vehicle.truck',
+            'Bus': 'vehicle.bus',
+            'Motorcycle': 'vehicle.motorcycle',
+            'MotorcyleRider': 'vehicle.motorcycle',  # Handle typo
+            'Bicycle': 'vehicle.bicycle',
+            'Auto': 'vehicle.auto',
+            'Person': 'human.pedestrian.adult',
+            'Rider': 'human.pedestrian.rider',
+            'Animal': 'animal',
+            'TrafficLight': 'static_object.trafficlight',
+            'TrafficSign': 'static_object.trafficsign',
+            'Pole': 'static_object.pole',
+            'OtherVehicle': 'vehicle.other',
+            'Misc': 'movable_object.debris'
+        }
+        
+        # Define sweeps directory structure (using cam0-cam5)
         sweeps_dir = os.path.join(dataloader.out_data, 'sweeps')
-        camera_channels = [
-            'CAM_FRONT',
-            'CAM_FRONT_LEFT',
-            'CAM_FRONT_RIGHT',
-            'CAM_BACK',
-            'CAM_BACK_LEFT',
-            'CAM_BACK_RIGHT'
-        ]
+        camera_channels = ['cam0', 'cam1', 'cam2', 'cam3', 'cam4', 'cam5']
         
         # Check if sweeps directory exists
         if not os.path.exists(sweeps_dir):
@@ -74,7 +87,6 @@ class IDD3DInstanceConverter(BaseConverter):
         # Process each timestep (matching image index across all cameras)
         for timestep_idx in range(max_images):
             # For each timestep, we process the corresponding frame
-            # Match timestep to frame_id (e.g., timestep 0 -> frame 01000, timestep 1 -> frame 01001)
             if timestep_idx < len(frame_ids):
                 frame_id = frame_ids[timestep_idx]
                 
@@ -99,15 +111,24 @@ class IDD3DInstanceConverter(BaseConverter):
                             instance_counter += 1
                             instance_token = f"instance_{instance_counter}"
                             
-                            # Get category token
-                            category_token = category_map.get(f'vehicle.{obj_type.lower()}', 
-                                                             category_map.get(f'human.pedestrian.{obj_type.lower()}',
-                                                             category_map.get(f'static_object.{obj_type.lower()}',
-                                                             f"cat_{obj_type}")))
+                            # FIXED: Get category token using proper mapping
+                            nuscenes_category_name = idd3d_to_nuscenes_categories.get(
+                                obj_type, 
+                                f'movable_object.{obj_type.lower()}'
+                            )
+                            
+                            # Look up the token from category.json
+                            category_token = category_map.get(nuscenes_category_name)
+                            
+                            if not category_token:
+                                # Fallback if not found in category.json
+                                category_token = f"cat_{obj_type}"
+                                loghandler.log(f"Warning: Category '{nuscenes_category_name}' not found in category.json for object {obj_id} (type: {obj_type})", "warning")
                             
                             instance_tracker[obj_id] = {
                                 'instance_token': instance_token,
                                 'category_token': category_token,
+                                'obj_type': obj_type,
                                 'first_timestep': timestep_idx,
                                 'last_timestep': timestep_idx,
                                 'first_frame': frame_id,
@@ -116,7 +137,7 @@ class IDD3DInstanceConverter(BaseConverter):
                                 'last_annotation': f"obj_{obj_id}_{frame_id}"
                             }
                             
-                            loghandler.log(f"New instance {instance_token} detected for object {obj_id} ({obj_type})", "info")
+                            loghandler.log(f"New instance {instance_token} for obj {obj_id} ({obj_type} -> {nuscenes_category_name})", "info")
                         else:
                             # Update last occurrence
                             instance_tracker[obj_id]['last_timestep'] = timestep_idx

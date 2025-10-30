@@ -714,43 +714,38 @@ class IDD3DCategoryConverter(BaseConverter):
             'OtherVehicle': 'vehicle.other',
             'Misc': 'movable_object.debris'
         }
+
+        # Descriptions for the target nuScenes categories
+        nuscenes_descriptions = {
+            'vehicle.car': 'A car.',
+            'vehicle.truck': 'A truck.',
+            'vehicle.bus': 'A bus.',
+            'vehicle.motorcycle': 'A motorcycle or motorcyclist.',
+            'vehicle.bicycle': 'A bicycle.',
+            'vehicle.auto': 'An auto-rickshaw.',
+            'human.pedestrian.adult': 'An adult pedestrian.',
+            'human.pedestrian.rider': 'A person riding a vehicle (e.g., bicycle).',
+            'animal': 'An animal.',
+            'static_object.traffic_light': 'A traffic light.',
+            'static_object.traffic_sign': 'A traffic sign.',
+            'static_object.pole': 'A pole.',
+            'vehicle.other': 'Other vehicle types.',
+            'movable_object.debris': 'Miscellaneous debris or movable objects.'
+        }
         
-        # Collect unique object types from label files
-        unique_obj_types = set()
-        frame_ids = sorted(data_loader.read_annotations().keys())
-        
-        for frame_id in frame_ids:
-            label_path = os.path.join(data_loader.label_dir, f"{frame_id}.json")
-            if not os.path.exists(label_path):
-                continue
-            
-            try:
-                with open(label_path, 'r') as f:
-                    label_objects = json.load(f)
-                for obj in label_objects:
-                    obj_type = obj.get("obj_type")
-                    if obj_type:
-                        unique_obj_types.add(obj_type)
-            except Exception:
-                pass
-        
-        # Create category entries with synced tokens
         categories = []
-        log_handler.log(f"Found {len(unique_obj_types)} unique object types in label files.", 'info')
+        processed_nuscenes_names = set()
         
-        for obj_type in sorted(unique_obj_types):
-            category_name = idd3d_to_nuscenes_categories.get(
-                obj_type, 
-                f'movable_object.{obj_type.lower()}' # Fallback for unmapped categories
-            )
-            
-            if obj_type not in idd3d_to_nuscenes_categories:
-                log_handler.log(f"  Unmapped type: '{obj_type}' -> using fallback '{category_name}'", 'warning')
+        # Statically create all 15 categories
+        for idd_type, nuscenes_name in idd3d_to_nuscenes_categories.items():
+            if nuscenes_name in processed_nuscenes_names:
+                continue
+            processed_nuscenes_names.add(nuscenes_name)
             
             category = {
-                "token": self.token_manager.get_category_token(category_name),
-                "name": category_name,
-                "description": f"{obj_type} category from IDD3D"
+                "token": self.token_manager.get_category_token(nuscenes_name),
+                "name": nuscenes_name,
+                "description": nuscenes_descriptions.get(nuscenes_name, f"Category for {nuscenes_name}")
             }
             categories.append(category)
         
@@ -759,7 +754,9 @@ class IDD3DCategoryConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump(categories, f, indent=2)
         
-        log_handler.log(f"Category file created with {len(categories)} categories", 'success')
+        log_handler.log(f"Category file created with {len(categories)} static categories", 'success')
+        for cat in categories:
+            log_handler.log(f"  - Generated: {cat['name']} (token: ...{cat['token'][-6:]})", 'info')
 
 
 class IDD3DSampleConverter(BaseConverter):
@@ -1013,6 +1010,7 @@ class IDD3DInstanceConverter(BaseConverter):
                         )
                         
                         # Use token manager for category token
+                        # This token will match the one in category.json
                         category_token = self.token_manager.get_category_token(category_name)
                         
                         instance_tracker[obj_id] = {
@@ -1132,6 +1130,7 @@ class IDD3DObjectsJsonConverter(BaseConverter):
                         obj_type, 
                         f'movable_object.{obj_type.lower()}'
                     )
+                    # This token will match the one in category.json
                     category_token = self.token_manager.get_category_token(category_name)
                     
                     # Generate unique annotation token (not tracked)
@@ -1244,6 +1243,10 @@ class IDD3DTimestampSyncConverter(BaseConverter):
                 # Re-check frame tokens and timestamps
                 updated_frames = 0
                 for i, frame in enumerate(frames):
+                    if i >= len(frame_ids):
+                        log_handler.log(f"Warning: frames.json has more entries ({len(frames)}) than frame_ids ({len(frame_ids)})", 'warning')
+                        break
+                    
                     frame_id = frame_ids[i] # Assume frames are in order
                     
                     # Update with proper timestamp from token manager

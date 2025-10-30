@@ -211,7 +211,7 @@ class DatasetConversionPipeline:
                 converter.run(data_loader, log_handler)
                 conversion_state['progress'] = ((idx + 1) / len(self.converters)) * 100
             except Exception as e:
-                log_handler.log(f"✗ {converter.name} failed: {str(e)}", 'error')
+                log_handler.log(f"{converter.name} failed: {str(e)}", 'error')
                 raise
 
 
@@ -234,9 +234,25 @@ class IDD3DDataLoader(BaseDataLoader):
         
         self.out_data = os.path.join(self.root, 'Intermediate_format/data')
         self.annot_out = os.path.join(self.root, 'Intermediate_format/anotations')
-        self.converted_lidar = os.path.join(self.out_data, 'converted_lidar')
+        self.converted_lidar = os.path.join(self.out_data, 'lidar')
+        self.cam_dir = os.path.join(self.out_data, 'cam')
     
     def ensure_output_dirs(self):
+        import shutil
+        
+        # Clean up old output directories if they exist
+        if os.path.exists(self.annot_out):
+            try:
+                shutil.rmtree(self.annot_out)
+            except Exception:
+                pass
+        
+        if os.path.exists(self.out_data):
+            # Don't delete out_data entirely, just clean subdirectories
+            # This will be handled by individual converters
+            pass
+        
+        # Create fresh directories
         os.makedirs(self.out_data, exist_ok=True)
         os.makedirs(self.annot_out, exist_ok=True)
         os.makedirs(self.converted_lidar, exist_ok=True)
@@ -293,7 +309,7 @@ class IDD3DLidarConverter(BaseConverter):
             use_o3d = True
         except ImportError:
             use_o3d = False
-            log_handler.log("⚠ open3d not available, creating placeholder files", 'warning')
+            log_handler.log("Warning: open3d not available, creating placeholder files", 'warning')
         
         files = [os.path.basename(p) for p in data_loader.list_lidar_files()]
         dst_dir = data_loader.converted_lidar
@@ -303,6 +319,17 @@ class IDD3DLidarConverter(BaseConverter):
             log_handler.log("No LiDAR files found", 'warning')
             return
         
+        # CLEAN UP EXISTING CONVERTED_LIDAR DIRECTORY
+        if os.path.exists(dst_dir):
+            import shutil
+            log_handler.log(f"Cleaning up existing converted_lidar directory: {dst_dir}", "info")
+            try:
+                shutil.rmtree(dst_dir)
+                log_handler.log("Old converted_lidar directory removed", "success")
+            except Exception as e:
+                log_handler.log(f"Warning: Could not remove old converted_lidar directory: {str(e)}", "warning")
+        
+        # Create fresh directory
         os.makedirs(dst_dir, exist_ok=True)
         converted = 0
         placeholders = 0
@@ -327,7 +354,7 @@ class IDD3DLidarConverter(BaseConverter):
                 open(dst, 'wb').close()
                 placeholders += 1
         
-        log_handler.log(f"✓ LiDAR conversion complete: {converted} converted, {placeholders} placeholders", 'success')
+        log_handler.log(f"LiDAR conversion complete: {converted} converted, {placeholders} placeholders", 'success')
 
 
 class IDD3DCameraConverter(BaseConverter):
@@ -353,7 +380,21 @@ class IDD3DCameraConverter(BaseConverter):
         # Keep original camera naming - output folders: cam0, cam1, cam2, cam3, cam4, cam5
         camerachannels = ["cam0", "cam1", "cam2", "cam3", "cam4", "cam5"]
         
-        sweepsdir = os.path.join(dataloader.out_data, "sweeps")
+        camdir = os.path.join(dataloader.out_data, "cam")
+        
+        # CLEAN UP EXISTING CAM DIRECTORY
+        if os.path.exists(camdir):
+            import shutil
+            loghandler.log(f"Cleaning up existing cam directory: {camdir}", "info")
+            try:
+                shutil.rmtree(camdir)
+                loghandler.log("Old cam directory removed", "success")
+            except Exception as e:
+                loghandler.log(f"Warning: Could not remove old cam directory: {str(e)}", "warning")
+        
+        # Create fresh cam directory
+        os.makedirs(camdir, exist_ok=True)
+        
         converted = 0
         errors = 0
         
@@ -365,8 +406,8 @@ class IDD3DCameraConverter(BaseConverter):
             
             # Output folder uses the same naming: cam0, cam1, etc. (with space)
             output_camid = f"cam {camid[-1]}"  # "cam0" -> "cam 0", "cam1" -> "cam 1"
-            sweepcamdir = os.path.join(sweepsdir, output_camid)
-            os.makedirs(sweepcamdir, exist_ok=True)
+            camsubdir = os.path.join(camdir, output_camid)
+            os.makedirs(camsubdir, exist_ok=True)
             
             pngfiles = sorted([f for f in os.listdir(camfolder) if f.lower().endswith('.png')])
             
@@ -375,7 +416,7 @@ class IDD3DCameraConverter(BaseConverter):
             for fname in pngfiles:
                 srcpath = os.path.join(camfolder, fname)
                 basename = os.path.splitext(fname)[0]
-                dstpath = os.path.join(sweepcamdir, basename + '.jpg')
+                dstpath = os.path.join(camsubdir, basename + '.jpg')
                 
                 try:
                     if usepil:
@@ -388,7 +429,7 @@ class IDD3DCameraConverter(BaseConverter):
                     errors += 1
                     loghandler.log(f"Error converting {fname}: {str(e)}", "error")
         
-        loghandler.log(f"✓ Camera conversion complete: {converted} images converted to sweeps, {errors} errors", "success")
+        loghandler.log(f"Camera conversion complete: {converted} images converted to cam, {errors} errors", "success")
 
 
 class IDD3DCalibConverter(BaseConverter):
@@ -430,14 +471,15 @@ class IDD3DCalibConverter(BaseConverter):
         with open(os.path.join(out_calib_dir, 'sensors.json'), 'w') as f:
             json.dump(sensors_j, f, indent=2)
         
-        log_handler.log("✓ Calibration stubs created", 'success')
+        log_handler.log("Calibration stubs created", 'success')
 
 
-class IDD3DAnnotationConverter(BaseConverter):
-    """Convert IDD3D frame annotations to intermediate format"""
+class IDD3DFrameConverter(BaseConverter):
+    """Convert IDD3D frame annotations to frames.json"""
     
-    def __init__(self, sequence_name: str = 'seq'):
-        super().__init__('annot')
+    def __init__(self, token_manager, sequence_name: str = 'seq'):
+        super().__init__('frame') # Renamed from 'annot'
+        self.token_manager = token_manager
         self.sequence_name = sequence_name
     
     def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
@@ -449,44 +491,42 @@ class IDD3DAnnotationConverter(BaseConverter):
         frame_ids = sorted(annot_data.keys())
         frames = []
         
+        # Get scene token from token manager
+        scene_token = self.token_manager.get_scene_token()
+        
         for i, frame_id in enumerate(frame_ids):
             data = annot_data[frame_id]
-            frame = {
-                "frame_id": frame_id,
-                "sequence": self.sequence_name,
-                "lidar": data.get("lidar", ""),
-                "timestamp": int(frame_id) * 100_000,
-                "cameras": {
-                    "CAM_FRONT": data.get("cam0", ""),
-                    "CAM_FRONT_LEFT": data.get("cam1", ""),
-                    "CAM_FRONT_RIGHT": data.get("cam2", ""),
-                    "CAM_BACK_LEFT": data.get("cam3", ""),
-                    "CAM_BACK_RIGHT": data.get("cam4", ""),
-                    "CAM_BACK": data.get("cam5", "")
-                },
-                "session_id": data.get("session_id", ""),
-                "prev_frame_token": frame_ids[i-1] if i > 0 else None,
-                "next_frame_token": frame_ids[i+1] if i < len(frame_ids)-1 else None,
-                "objects": []
-            }
             
-            label_path = os.path.join(data_loader.label_dir, f"{frame_id}.json")
-            if os.path.exists(label_path):
-                try:
-                    with open(label_path, 'r') as f:
-                        label_objects = json.load(f)
-                    frame["objects"] = [
-                        {
-                            "obj_id": obj.get("obj_id"),
-                            "obj_type": obj.get("obj_type"),
-                            "position": obj.get("psr", {}).get("position"),
-                            "rotation": obj.get("psr", {}).get("rotation"),
-                            "scale": obj.get("psr", {}).get("scale")
-                        }
-                        for obj in label_objects
-                    ]
-                except Exception:
-                    pass
+            # Generate frame token
+            frame_token = self.token_manager.get_frame_token(frame_id)
+            
+            # Generate proper timestamp
+            timestamp = self.token_manager.get_timestamp(i)
+            
+            # Build sensor_data structure (as dict of strings, per user template)
+            sensor_data = {}
+            
+            # Add camera data (cam0 to cam5)
+            for cam_idx in range(6):
+                cam_key = f"cam{cam_idx}"
+                cam_filename = data.get(cam_key, f"{frame_id}.jpg")
+                # Path format matches IDD3DCameraConverter output
+                sensor_data[cam_key] = f"data/cam/cam {cam_idx}/{cam_filename}"
+            
+            # Add lidar data
+            lidar_filename = data.get("lidar", f"{frame_id}.pcd.bin")
+            # Path format matches IDD3DLidarConverter output
+            sensor_data["lidar"] = f"data/lidar/{lidar_filename}"
+            
+            frame = {
+                "frame_token": frame_token,
+                "timestamp": timestamp,
+                "scene_token": scene_token,
+                "sensor_data": sensor_data,
+                "prev_frame_token": self.token_manager.get_frame_token(frame_ids[i-1]) if i > 0 else None,
+                "next_frame_token": self.token_manager.get_frame_token(frame_ids[i+1]) if i < len(frame_ids)-1 else None,
+                "calibration_token": "calib_default" # Added as per user template
+            }
             
             frames.append(frame)
         
@@ -494,7 +534,7 @@ class IDD3DAnnotationConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump(frames, f, indent=2)
         
-        log_handler.log(f"✓ Annotations converted ({len(frames)} frames)", 'success')
+        log_handler.log(f"frames.json converted ({len(frames)} frames)", 'success')
 
 
 class IDD3DSceneConverter(BaseConverter):
@@ -533,7 +573,7 @@ class IDD3DSceneConverter(BaseConverter):
         scene = {
             "token": scene_token,
             "log_token": log_token,
-            "nbr_samples": len(frame_ids),
+            "nbr_samples": None,
             "first_sample_token": first_sample_token,
             "last_sample_token": last_sample_token,
             "name": self.sequence_name,
@@ -545,111 +585,11 @@ class IDD3DSceneConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump([scene], f, indent=2)
         
-        log_handler.log(f"✓ Scene file created", 'success')
+        log_handler.log(f"Scene file created", 'success')
         log_handler.log(f"  Scene token: {scene_token}", 'info')
-        log_handler.log(f"  Number of samples: {len(frame_ids)}", 'info')
+        log_handler.log(f"  Number of samples: null (to be calculated)", 'info')
         log_handler.log(f"  First sample token: {first_sample_token}", 'info')
         log_handler.log(f"  Last sample token: {last_sample_token}", 'info')
-
-
-class IDD3DAttributeConverter(BaseConverter):
-    """Generate attribute.json for object attributes"""
-    
-    def __init__(self, token_manager):
-        super().__init__('attribute')
-        self.token_manager = token_manager
-    
-    def run(self, data_loader, log_handler):
-        # Common attributes for autonomous driving
-        attributes = [
-            {
-                "token": self.token_manager.get_category_token("attr.vehicle.moving"),
-                "name": "vehicle.moving",
-                "description": "Vehicle is moving"
-            },
-            {
-                "token": self.token_manager.get_category_token("attr.vehicle.stopped"),
-                "name": "vehicle.stopped",
-                "description": "Vehicle is stopped"
-            },
-            {
-                "token": self.token_manager.get_category_token("attr.vehicle.parked"),
-                "name": "vehicle.parked",
-                "description": "Vehicle is parked"
-            },
-            {
-                "token": self.token_manager.get_category_token("attr.pedestrian.standing"),
-                "name": "pedestrian.standing",
-                "description": "Pedestrian is standing"
-            },
-            {
-                "token": self.token_manager.get_category_token("attr.pedestrian.sitting_lying_down"),
-                "name": "pedestrian.sitting_lying_down",
-                "description": "Pedestrian is sitting or lying down"
-            },
-            {
-                "token": self.token_manager.get_category_token("attr.pedestrian.moving"),
-                "name": "pedestrian.moving",
-                "description": "Pedestrian is moving"
-            },
-            {
-                "token": self.token_manager.get_category_token("attr.cycle.with_rider"),
-                "name": "cycle.with_rider",
-                "description": "Cycle with rider"
-            },
-            {
-                "token": self.token_manager.get_category_token("attr.cycle.without_rider"),
-                "name": "cycle.without_rider",
-                "description": "Cycle without rider"
-            }
-        ]
-        
-        # Save attribute.json
-        out_path = os.path.join(data_loader.annot_out, 'attribute.json')
-        with open(out_path, 'w') as f:
-            json.dump(attributes, f, indent=2)
-        
-        log_handler.log(f"✓ Attribute file created with {len(attributes)} attributes", 'success')
-
-
-class IDD3DVisibilityConverter(BaseConverter):
-    """Generate visibility.json for visibility levels"""
-    
-    def __init__(self, token_manager):
-        super().__init__('visibility')
-        self.token_manager = token_manager
-    
-    def run(self, data_loader, log_handler):
-        # Standard visibility levels
-        visibility_levels = [
-            {
-                "token": self.token_manager.get_category_token("visibility.full"),
-                "level": "full",
-                "description": "Object is fully visible (80-100%)"
-            },
-            {
-                "token": self.token_manager.get_category_token("visibility.most"),
-                "level": "most",
-                "description": "Object is mostly visible (60-80%)"
-            },
-            {
-                "token": self.token_manager.get_category_token("visibility.partial"),
-                "level": "partial",
-                "description": "Object is partially visible (40-60%)"
-            },
-            {
-                "token": self.token_manager.get_category_token("visibility.minimal"),
-                "level": "minimal",
-                "description": "Object has minimal visibility (0-40%)"
-            }
-        ]
-        
-        # Save visibility.json
-        out_path = os.path.join(data_loader.annot_out, 'visibility.json')
-        with open(out_path, 'w') as f:
-            json.dump(visibility_levels, f, indent=2)
-        
-        log_handler.log(f"✓ Visibility file created with {len(visibility_levels)} levels", 'success')
 
 
 class IDD3DSampleDataConverter(BaseConverter):
@@ -681,9 +621,6 @@ class IDD3DSampleDataConverter(BaseConverter):
             sample_token = self.token_manager.get_frame_token(frame_id)
             timestamp = self.token_manager.get_timestamp(i)
             
-            # Get ego_pose_token (placeholder since we skip ego_pose.json)
-            ego_pose_token = uuid.uuid4().hex
-            
             # Get calibrated_sensor_token (from calibration)
             # We'll use placeholder tokens that match calibration file
             
@@ -694,9 +631,8 @@ class IDD3DSampleDataConverter(BaseConverter):
             sample_data_list.append({
                 "token": lidar_sample_data_token,
                 "sample_token": sample_token,
-                "ego_pose_token": ego_pose_token,
                 "calibrated_sensor_token": self.token_manager.get_calibration_token("Lidar"),
-                "filename": f"data/converted_lidar/{lidar_filename}",
+                "filename": f"data/lidar/{lidar_filename}",
                 "fileformat": "pcd.bin",
                 "width": 0,
                 "height": 0,
@@ -714,9 +650,8 @@ class IDD3DSampleDataConverter(BaseConverter):
                 sample_data_list.append({
                     "token": cam_sample_data_token,
                     "sample_token": sample_token,
-                    "ego_pose_token": ego_pose_token,
                     "calibrated_sensor_token": self.token_manager.get_calibration_token(cam_channel),
-                    "filename": f"data/sweeps/cam {cam_idx}/{cam_filename}",
+                    "filename": f"data/cam/cam {cam_idx}/{cam_filename}",
                     "fileformat": "jpg",
                     "width": 1920,  # IDD3D typical resolution
                     "height": 1080,
@@ -748,7 +683,7 @@ class IDD3DSampleDataConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump(sample_data_list, f, indent=2)
         
-        log_handler.log(f"✓ Sample data file created with {len(sample_data_list)} entries", 'success')
+        log_handler.log(f"Sample data file created with {len(sample_data_list)} entries", 'success')
         log_handler.log(f"  LiDAR entries: {len(frame_ids)}", 'info')
         log_handler.log(f"  Camera entries: {len(frame_ids) * 6}", 'info')
 
@@ -761,12 +696,13 @@ class IDD3DCategoryConverter(BaseConverter):
         self.token_manager = token_manager
     
     def run(self, data_loader, log_handler):
-        # IDD3D to nuScenes category mapping
+        # IDD3D to nuScenes category mapping (Standardized to 15 keys)
         idd3d_to_nuscenes_categories = {
             'Car': 'vehicle.car',
             'Truck': 'vehicle.truck',
             'Bus': 'vehicle.bus',
             'Motorcycle': 'vehicle.motorcycle',
+            'MotorcyleRider': 'vehicle.motorcycle', # Standardized
             'Bicycle': 'vehicle.bicycle',
             'Auto': 'vehicle.auto',
             'Person': 'human.pedestrian.adult',
@@ -800,11 +736,16 @@ class IDD3DCategoryConverter(BaseConverter):
         
         # Create category entries with synced tokens
         categories = []
+        log_handler.log(f"Found {len(unique_obj_types)} unique object types in label files.", 'info')
+        
         for obj_type in sorted(unique_obj_types):
             category_name = idd3d_to_nuscenes_categories.get(
                 obj_type, 
-                f'movable_object.{obj_type.lower()}'
+                f'movable_object.{obj_type.lower()}' # Fallback for unmapped categories
             )
+            
+            if obj_type not in idd3d_to_nuscenes_categories:
+                log_handler.log(f"  Unmapped type: '{obj_type}' -> using fallback '{category_name}'", 'warning')
             
             category = {
                 "token": self.token_manager.get_category_token(category_name),
@@ -818,7 +759,7 @@ class IDD3DCategoryConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump(categories, f, indent=2)
         
-        log_handler.log(f"✓ Category file created with {len(categories)} categories", 'success')
+        log_handler.log(f"Category file created with {len(categories)} categories", 'success')
 
 
 class IDD3DSampleConverter(BaseConverter):
@@ -869,7 +810,7 @@ class IDD3DSampleConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump(samples, f, indent=2)
         
-        log_handler.log(f"✓ Sample file created with {len(samples)} samples", 'success')
+        log_handler.log(f"Sample file created with {len(samples)} samples", 'success')
         log_handler.log(f"  Frame rate: {self.token_manager.frame_rate_hz} Hz", 'info')
         log_handler.log(f"  Timestamp range: {samples[0]['timestamp']} - {samples[-1]['timestamp']}", 'info')
 
@@ -893,12 +834,13 @@ class IDD3DSampleAnnotationConverter(BaseConverter):
             log_handler.log("No frames found", 'warning')
             return
         
-        # IDD3D to category mapping
+        # IDD3D to category mapping (Standardized to 15 keys)
         idd3d_to_nuscenes_categories = {
             'Car': 'vehicle.car',
             'Truck': 'vehicle.truck',
             'Bus': 'vehicle.bus',
             'Motorcycle': 'vehicle.motorcycle',
+            'MotorcyleRider': 'vehicle.motorcycle', # Standardized
             'Bicycle': 'vehicle.bicycle',
             'Auto': 'vehicle.auto',
             'Person': 'human.pedestrian.adult',
@@ -1002,7 +944,7 @@ class IDD3DSampleAnnotationConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump(sample_annotations, f, indent=2)
         
-        log_handler.log(f"✓ Sample annotation file created with {len(sample_annotations)} annotations", 'success')
+        log_handler.log(f"Sample annotation file created with {len(sample_annotations)} annotations", 'success')
 
 
 class IDD3DInstanceConverter(BaseConverter):
@@ -1013,12 +955,13 @@ class IDD3DInstanceConverter(BaseConverter):
         self.token_manager = token_manager
     
     def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
-        # IDD3D to nuScenes category mapping
+        # IDD3D to nuScenes category mapping (Standardized to 15 keys)
         idd3d_to_nuscenes_categories = {
             'Car': 'vehicle.car',
             'Truck': 'vehicle.truck',
             'Bus': 'vehicle.bus',
             'Motorcycle': 'vehicle.motorcycle',
+            'MotorcyleRider': 'vehicle.motorcycle', # Standardized
             'Bicycle': 'vehicle.bicycle',
             'Auto': 'vehicle.auto',
             'Person': 'human.pedestrian.adult',
@@ -1097,7 +1040,7 @@ class IDD3DInstanceConverter(BaseConverter):
             instance = {
                 "token": data['instance_token'],
                 "category_token": data['category_token'],
-                "nbr_annotations": 1,
+                "nbr_annotations": None,
                 "first_annotation_token": data['first_annotation_token'],
                 "last_annotation_token": data['last_annotation_token']
             }
@@ -1117,7 +1060,7 @@ class IDD3DInstanceConverter(BaseConverter):
         with open(out_path, 'w') as f:
             json.dump(instances, f, indent=2)
         
-        log_handler.log(f"✓ Instance file created with {len(instances)} instances", 'success')
+        log_handler.log(f"Instance file created with {len(instances)} instances", 'success')
 
 
 class IDD3DObjectsJsonConverter(BaseConverter):
@@ -1135,13 +1078,13 @@ class IDD3DObjectsJsonConverter(BaseConverter):
         
         frame_ids = sorted(annot_data.keys())
         
-        # IDD3D to nuScenes category mapping
+        # IDD3D to nuScenes category mapping (Standardized to 15 keys)
         idd3d_to_nuscenes_categories = {
             'Car': 'vehicle.car',
             'Truck': 'vehicle.truck',
             'Bus': 'vehicle.bus',
             'Motorcycle': 'vehicle.motorcycle',
-            'MotorcyleRider': 'vehicle.motorcycle',
+            'MotorcyleRider': 'vehicle.motorcycle', # Standardized
             'Bicycle': 'vehicle.bicycle',
             'Auto': 'vehicle.auto',
             'Person': 'human.pedestrian.adult',
@@ -1257,12 +1200,12 @@ class IDD3DObjectsJsonConverter(BaseConverter):
             with open(out_path, 'w', encoding='utf-8') as f:
                 json.dump(objects_list, f, indent=2)
             
-            loghandler.log(f"✓ objects.json created with {len(objects_list)} 3D bounding boxes", "success")
-            loghandler.log(f"✓ Tracked {len(self.token_manager.instance_tokens)} unique instances", "info")
-            loghandler.log(f"✓ Output saved to: {out_path}", "success")
+            loghandler.log(f"objects.json created with {len(objects_list)} 3D bounding boxes", "success")
+            loghandler.log(f"Tracked {len(self.token_manager.instance_tokens)} unique instances", "info")
+            loghandler.log(f"Output saved to: {out_path}", "success")
                 
         except Exception as e:
-            loghandler.log(f"✗ Error writing objects.json: {str(e)}", 'error')
+            loghandler.log(f"Error writing objects.json: {str(e)}", 'error')
             import traceback
             loghandler.log(traceback.format_exc(), 'error')
             raise
@@ -1298,17 +1241,30 @@ class IDD3DTimestampSyncConverter(BaseConverter):
                 with open(frames_path, 'r') as f:
                     frames = json.load(f)
                 
+                # Re-check frame tokens and timestamps
+                updated_frames = 0
                 for i, frame in enumerate(frames):
-                    frame_id = frame['frame_id']
+                    frame_id = frame_ids[i] # Assume frames are in order
+                    
                     # Update with proper timestamp from token manager
-                    frame['timestamp'] = self.token_manager.get_timestamp(i)
+                    new_timestamp = self.token_manager.get_timestamp(i)
+                    if frame.get('timestamp') != new_timestamp:
+                        frame['timestamp'] = new_timestamp
+                        updated_frames += 1
+                        
                     # Update tokens to match
-                    frame['frame_token'] = self.token_manager.get_frame_token(frame_id)
+                    new_token = self.token_manager.get_frame_token(frame_id)
+                    if frame.get('frame_token') != new_token:
+                        frame['frame_token'] = new_token
+                        if updated_frames == 0: updated_frames = 1 # Mark as updated
                 
-                with open(frames_path, 'w') as f:
-                    json.dump(frames, f, indent=2)
-                
-                log_handler.log("✓ Updated timestamps in frames.json", 'success')
+                if updated_frames > 0:
+                    with open(frames_path, 'w') as f:
+                        json.dump(frames, f, indent=2)
+                    log_handler.log(f"Verified/Updated timestamps in frames.json ({updated_frames} frames)", 'success')
+                else:
+                    log_handler.log("Timestamps in frames.json are already correct", 'info')
+                    
             except Exception as e:
                 log_handler.log(f"Error updating frames.json timestamps: {str(e)}", 'warning')
         
@@ -1316,11 +1272,11 @@ class IDD3DTimestampSyncConverter(BaseConverter):
         registry_path = os.path.join(data_loader.annot_out, 'token_registry.json')
         try:
             self.token_manager.save_registry(registry_path)
-            log_handler.log(f"✓ Token registry saved to: {registry_path}", 'info')
+            log_handler.log(f"Token registry saved to: {registry_path}", 'info')
         except Exception as e:
             log_handler.log(f"Warning: Could not save token registry: {str(e)}", 'warning')
         
-        log_handler.log("✓ Timestamp synchronization complete", 'success')
+        log_handler.log("Timestamp synchronization complete", 'success')
 
 
 # CONVERTER REGISTRY
@@ -1370,20 +1326,18 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
         pipeline.add_converter(IDD3DCameraConverter())
     if conversions.get('calib', False):
         pipeline.add_converter(IDD3DCalibConverter())
-    if conversions.get('annot', False):
-        pipeline.add_converter(IDD3DAnnotationConverter(sequence_name))
     
     # PHASE 2: Taxonomy (no dependencies)
     if conversions.get('category', False):
         pipeline.add_converter(IDD3DCategoryConverter(token_manager))
-    if conversions.get('attribute', False):
-        pipeline.add_converter(IDD3DAttributeConverter(token_manager))
-    if conversions.get('visibility', False):
-        pipeline.add_converter(IDD3DVisibilityConverter(token_manager))
     
     # PHASE 3: Scene (creates scene_token for samples)
     if conversions.get('scene', False):
         pipeline.add_converter(IDD3DSceneConverter(token_manager, sequence_name))
+    
+    # PHASE 4: Frames (generates frames.json, depends on scene token)
+    if conversions.get('frame', False): # Renamed from 'annot'
+        pipeline.add_converter(IDD3DFrameConverter(token_manager, sequence_name)) # Renamed class
     
     # PHASE 4: Samples (depends on scene)
     if conversions.get('sample', False):
@@ -1488,11 +1442,11 @@ def convert_stream():
                 log_handler.log("No conversion modules selected", 'warning')
             else:
                 pipeline.run(loader, log_handler)
-                log_handler.log("✓ Conversion pipeline completed successfully!", 'success')
+                log_handler.log("Conversion pipeline completed successfully!", 'success')
                 log_handler.log(f"Output directory: {root_path}/Intermediate_format/", 'info')
         
         except Exception as e:
-            log_handler.log(f"✗ Conversion failed: {str(e)}", 'error')
+            log_handler.log(f"Conversion failed: {str(e)}", 'error')
             import traceback
             log_handler.log(traceback.format_exc(), 'error')
         

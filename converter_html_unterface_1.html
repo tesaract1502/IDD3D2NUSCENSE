@@ -112,7 +112,7 @@
         .form-group input:focus,
         .form-group select:focus {
             outline: none;
-            ring: 2px;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
             border-color: #3b82f6;
         }
 
@@ -323,7 +323,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" alt="KPIT Logo" class="logo" id="companyLogo">
+            <img src="/home/siddharthb9/Desktop/nuSceneses&IDD3D/idd3d2nuScenes/idd3d_to_nuscenes_scripts/kpitlogo.png" alt="KPIT Logo" class="logo" id="companyLogo">
             <div class="header-text">
                 <h1>Dataset Converter</h1>
                 <p>Convert between autonomous driving dataset formats</p>
@@ -331,9 +331,7 @@
         </div>
 
         <div class="grid">
-            <!-- Left Column -->
             <div class="column-left">
-                <!-- Source Dataset -->
                 <div class="card">
                     <h2>Source Dataset</h2>
                     <div class="form-group">
@@ -349,7 +347,6 @@
                     </div>
                 </div>
 
-                <!-- Target Dataset -->
                 <div class="card">
                     <h2>Target Format</h2>
                     <div class="form-group">
@@ -365,7 +362,6 @@
                     </div>
                 </div>
 
-                <!-- Paths -->
                 <div class="card">
                     <h2>Paths</h2>
                     <div class="form-group">
@@ -381,9 +377,7 @@
                 </div>
             </div>
 
-            <!-- Right Column -->
             <div class="column-right">
-                <!-- Conversion Modules -->
                 <div class="card">
                     <h2>Conversion Modules</h2>
                     <div class="checkbox-group">
@@ -404,15 +398,23 @@
                         <label class="checkbox-item checked">
                             <input type="checkbox" name="conv" value="calib" checked>
                             <div class="checkbox-label">
-                                <p>Calibration Stubs</p>
+                                <p>Calibration</p>
                                 <p>Generate sensor calibration</p>
                             </div>
                         </label>
+                        
                         <label class="checkbox-item checked">
-                            <input type="checkbox" name="conv" value="annot" checked>
+                            <input type="checkbox" name="conv" value="frame" checked>
                             <div class="checkbox-label">
-                                <p>Annotations</p>
-                                <p>Convert frame annotations</p>
+                                <p>Frames</p>
+                                <p>Generate frames.json</p>
+                            </div>
+                        </label>
+                        <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="scene" checked>
+                            <div class="checkbox-label">
+                                <p>Scene</p>
+                                <p>Generate scene.json metadata</p>
                             </div>
                         </label>
                         <label class="checkbox-item checked">
@@ -420,6 +422,13 @@
                             <div class="checkbox-label">
                                 <p>Sample</p>
                                 <p>Build sample sequence</p>
+                            </div>
+                        </label>
+                        <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="sample_data" checked>
+                            <div class="checkbox-label">
+                                <p>Sample Data</p>
+                                <p>Link samples to sensor files</p>
                             </div>
                         </label>
                         <label class="checkbox-item checked">
@@ -440,14 +449,14 @@
                             <input type="checkbox" name="conv" value="instance" checked>
                             <div class="checkbox-label">
                                 <p>Instance</p>
-                                <p>Generate instance tracking</p>
+                                <p>Generate instance.json (track objects)</p>
                             </div>
                         </label>
                         <label class="checkbox-item checked">
                             <input type="checkbox" name="conv" value="objects" checked>
                             <div class="checkbox-label">
-                                <p>Objects (3D Annotations)</p>
-                                <p>Generate 3D bounding box data</p>
+                                <p>Objects (3D Bounding Boxes)</p>
+                                <p>Generate objects.json with bbox_3d format</p>
                             </div>
                         </label>
                     </div>
@@ -467,7 +476,6 @@
                     <button class="button primary" id="startBtn" onclick="startConversion()" style="margin-top: 20px;">▶ Start Conversion</button>
                 </div>
 
-                <!-- Logs -->
                 <div class="card">
                     <h2>Conversion Log</h2>
                     <div class="logs" id="logsContainer">
@@ -507,14 +515,15 @@
             });
         });
 
-        function addLog(message, type = 'info') {
+        function addLog(message, type = 'info', backendTs = null) {
             const logsContainer = document.getElementById('logsContainer');
             
             if (logsContainer.querySelector('.log-empty')) {
                 logsContainer.innerHTML = '';
             }
 
-            const timestamp = new Date().toLocaleTimeString();
+            // Prefer backend-provided timestamp if available (ext.py provides a "timestamp" string)
+            const timestamp = backendTs ? backendTs : new Date().toLocaleTimeString();
             const logLine = document.createElement('div');
             logLine.className = `log-line ${type}`;
             logLine.textContent = `[${timestamp}] ${message}`;
@@ -542,7 +551,7 @@
                 if (data.valid) {
                     resultDiv.innerHTML = `
                         <div class="info-box green">
-                            <strong>✓ Paths valid</strong>
+                            <strong>Paths valid</strong>
                             LiDAR files: ${data.lidar_files}<br>
                             Label files: ${data.label_files}
                         </div>
@@ -550,7 +559,7 @@
                 } else {
                     resultDiv.innerHTML = `
                         <div class="info-box red">
-                            <strong>✗ Validation failed</strong>
+                            <strong>Validation failed</strong>
                             ${data.error}
                         </div>
                     `;
@@ -579,6 +588,7 @@
             }
 
             const conversions = {};
+            // Note: timestamp_sync input is disabled so it will be excluded automatically
             document.querySelectorAll('input[name="conv"]:not(:disabled)').forEach(checkbox => {
                 conversions[checkbox.value] = checkbox.checked;
             });
@@ -635,11 +645,13 @@
                         if (line.startsWith('data: ')) {
                             try {
                                 const logEntry = JSON.parse(line.slice(6));
+                                // ext.py sends entries with fields: timestamp, message, type
                                 if (logEntry.type === 'complete') {
                                     document.getElementById('progressFill').style.width = '100%';
                                     document.getElementById('progressPercent').textContent = '100%';
                                 } else {
-                                    addLog(logEntry.message, logEntry.type);
+                                    // Pass backend timestamp to addLog when available
+                                    addLog(logEntry.message, logEntry.type, logEntry.timestamp || null);
                                 }
                             } catch (e) {
                                 // Skip parse errors
@@ -648,7 +660,7 @@
                     }
                 }
 
-                addLog('✓ Conversion completed successfully!', 'success');
+                addLog('Conversion completed successfully!', 'success');
                 addLog(`Output directory: ${rootPath}/Intermediate_format/`, 'info');
             } catch (error) {
                 addLog(`Error: ${error.message}`, 'error');

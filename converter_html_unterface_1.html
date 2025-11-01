@@ -364,13 +364,10 @@
 
                 <div class="card">
                     <h2>Paths</h2>
+                    
                     <div class="form-group">
-                        <label>Root Directory</label>
-                        <input type="text" id="rootPath" value="/home/siddharthb9/Desktop/nuSceneses&IDD3D">
-                    </div>
-                    <div class="form-group">
-                        <label>Sequence ID</label>
-                        <input type="text" id="sequenceId" value="20220118103308_seq_10">
+                        <label>Sequence Path (Absolute Path)</label>
+                        <input type="text" id="sequencePath" value="/home/siddharthb9/Desktop/nuSceneses&IDD3D/idd3d_seq10">
                     </div>
                     <button class="button secondary" id="validateBtn" onclick="validatePaths()">Validate Paths</button>
                     <div id="validationResult" style="margin-top: 12px;"></div>
@@ -402,7 +399,6 @@
                                 <p>Generate sensor calibration</p>
                             </div>
                         </label>
-                        
                         <label class="checkbox-item checked">
                             <input type="checkbox" name="conv" value="frame" checked>
                             <div class="checkbox-label">
@@ -490,19 +486,6 @@
         const API_BASE = 'http://localhost:5001/api';
         let isRunning = false;
 
-        const datasets = {
-            idd3d: {
-                name: 'IDD3D (Indian Dataset)',
-                description: '6 cameras, 1 LiDAR, GPS - 10Hz camera, 10Hz LiDAR',
-                sensors: '6 RGB cameras, 64-channel LiDAR, GPS'
-            },
-            nuscenes: {
-                name: 'nuScenes',
-                description: '6 cameras, 1 LiDAR, 5 RADARs, GPS/IMU - 12Hz camera, 20Hz LiDAR',
-                sensors: '6 cameras, Velodyne HDL-32E, 5 RADARs, GPS/IMU'
-            }
-        };
-
         // Update checkbox styling on change
         document.querySelectorAll('input[name="conv"]').forEach(checkbox => {
             checkbox.addEventListener('change', function() {
@@ -522,7 +505,7 @@
                 logsContainer.innerHTML = '';
             }
 
-            // Prefer backend-provided timestamp if available (ext.py provides a "timestamp" string)
+            // Prefer backend-provided timestamp if available
             const timestamp = backendTs ? backendTs : new Date().toLocaleTimeString();
             const logLine = document.createElement('div');
             logLine.className = `log-line ${type}`;
@@ -533,8 +516,8 @@
         }
 
         async function validatePaths() {
-            const rootPath = document.getElementById('rootPath').value;
-            const sequenceId = document.getElementById('sequenceId').value;
+            // UPDATED JAVASCRIPT
+            const sequencePath = document.getElementById('sequencePath').value;
             const resultDiv = document.getElementById('validationResult');
 
             document.getElementById('validateBtn').disabled = true;
@@ -543,8 +526,11 @@
                 const response = await fetch(`${API_BASE}/validate-paths`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ root_path: rootPath, sequence_id: sequenceId })
+                    body: JSON.stringify({ 
+                        sequence_path: sequencePath 
+                    })
                 });
+                // END OF UPDATE
 
                 const data = await response.json();
 
@@ -579,16 +565,16 @@
         async function startConversion() {
             if (isRunning) return;
 
-            const rootPath = document.getElementById('rootPath').value;
-            const sequenceId = document.getElementById('sequenceId').value;
+            // UPDATED JAVASCRIPT
+            const sequencePath = document.getElementById('sequencePath').value;
 
-            if (!rootPath.trim()) {
-                addLog('Error: Root path is required', 'error');
+            if (!sequencePath.trim()) {
+                addLog('Error: Sequence path is required', 'error');
                 return;
             }
+            // END OF UPDATE
 
             const conversions = {};
-            // Note: timestamp_sync input is disabled so it will be excluded automatically
             document.querySelectorAll('input[name="conv"]:not(:disabled)').forEach(checkbox => {
                 conversions[checkbox.value] = checkbox.checked;
             });
@@ -605,22 +591,22 @@
             document.getElementById('logsContainer').innerHTML = '';
 
             addLog(`Starting conversion: idd3d → nuscenes`, 'info');
-            addLog(`Root path: ${rootPath}`, 'info');
-            addLog(`Sequence ID: ${sequenceId}`, 'info');
+            addLog(`Sequence Path: ${sequencePath}`, 'info'); // Updated log
             addLog(`Active conversions: ${Object.keys(conversions).filter(k => conversions[k]).join(', ')}`, 'info');
 
             try {
+                // UPDATED JAVASCRIPT
                 const response = await fetch(`${API_BASE}/convert/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        root_path: rootPath,
-                        sequence_id: sequenceId,
+                        sequence_path: sequencePath,
                         conversions: conversions,
                         source: 'idd3d',
                         target: 'nuscenes'
                     })
                 });
+                // END OF UPDATE
 
                 if (!response.ok) {
                     const error = await response.json();
@@ -645,12 +631,10 @@
                         if (line.startsWith('data: ')) {
                             try {
                                 const logEntry = JSON.parse(line.slice(6));
-                                // ext.py sends entries with fields: timestamp, message, type
                                 if (logEntry.type === 'complete') {
                                     document.getElementById('progressFill').style.width = '100%';
                                     document.getElementById('progressPercent').textContent = '100%';
                                 } else {
-                                    // Pass backend timestamp to addLog when available
                                     addLog(logEntry.message, logEntry.type, logEntry.timestamp || null);
                                 }
                             } catch (e) {
@@ -661,7 +645,7 @@
                 }
 
                 addLog('Conversion completed successfully!', 'success');
-                addLog(`Output directory: ${rootPath}/Intermediate_format/`, 'info');
+                // The backend will now log the correct output paths
             } catch (error) {
                 addLog(`Error: ${error.message}`, 'error');
             } finally {

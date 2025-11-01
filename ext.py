@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 import os
 import json
 import threading
+import shutil
 from queue import Queue
 from datetime import datetime
 import logging
@@ -26,6 +27,8 @@ conversion_state = {
 }
 
 conversion_lock = threading.Lock()
+# --- Add a lock for shared scene.json file ---
+scene_file_lock = threading.Lock()
 
 
 class LogHandler:
@@ -63,7 +66,7 @@ class TokenTimestampManager:
             frame_rate_hz: Frame rate in Hz (default: 10 for IDD3D)
         """
         self.frame_rate_hz = frame_rate_hz
-        self.frame_interval_us = int(1_000_000 / frame_rate_hz)  # microseconds between frames
+        self.frame_interval_us = int(1_000_000 / self.frame_rate_hz)  # microseconds between frames
         
         # Use provided base timestamp or generate one
         if base_timestamp is None:
@@ -218,29 +221,53 @@ class DatasetConversionPipeline:
 # IDD3D IMPLEMENTATION
 
 class IDD3DDataLoader(BaseDataLoader):
-    """Loader for IDD3D dataset"""
+    """
+    Loader for IDD3D dataset.
+    Expects 'root' to be the project root and 'sequence' to be the 
+    relative path to the specific sequence folder from the root.
+    """
     
-    def __init__(self, root: str, sequence: str = '20220118103308_seq_10'):
+    def __init__(self, root: str, sequence: str = 'idd3d_seq10'):
+        # 'root' is the project root (e.g., /home/siddharthb9/Desktop/nuSceneses&IDD3D)
+        # 'sequence' is the RELATIVE PATH to the sequence data
+        # (e.g., idd3d_seq10)
         super().__init__(root, sequence)
-        self.seq_base = os.path.join(
-            self.root,
-            'idd3d_dataset_seq10 (c)/idd3d_seq10/train_val',
-            sequence
-        )
-        self.lidar_dir = os.path.join(self.seq_base, 'lidar')
-        self.label_dir = os.path.join(self.seq_base, 'label')
-        self.calib_dir = os.path.join(self.seq_base, 'calib')
-        self.annot_json = os.path.join(self.seq_base, 'annot_data.json')
         
-        self.out_data = os.path.join(self.root, 'Intermediate_format/data')
-        self.annot_out = os.path.join(self.root, 'Intermediate_format/anotations')
+        # --- INPUT PATHS ---
+        # self.seq_base is the full path to the SOURCE sequence folder
+        self.seq_base = os.path.join(self.root, self.sequence)
+        
+        self.lidar_dir = os.path.join(self.seq_base, 'lidar')
+        self.label_dir = os.path.join(self.seq_base, 'lable') # <-- CHANGED from 'label'
+        self.calib_dir = os.path.join(self.seq_base, 'calib')
+        self.annot_json = os.path.join(self.seq_base, 'annot_data.json') # <-- CHANGED from 'annot.json'
+        
+        # --- OUTPUT PATHS ---
+        # Get short sequence name (e.g., 'idd3d_seq8' -> '8', 'idd3d_seq10' -> '10')
+        seq_short_name = self.sequence.split(os.path.sep)[-1]
+        seq_num = seq_short_name.split('_')[-1] # This will get '10' from 'idd3d_seq10'
+        self.output_seq_name = f"nuSceneSeq{seq_num}"
+        
+        # Base output directory for this specific sequence
+        self.output_base = os.path.join(self.root, 'nuScenesFormat', self.output_seq_name)
+        
+        # Sequence-specific output directories
+        self.out_data = os.path.join(self.output_base, 'data')
+        self.annot_out = os.path.join(self.output_base, 'anotations')
         self.converted_lidar = os.path.join(self.out_data, 'lidar')
         self.cam_dir = os.path.join(self.out_data, 'cam')
+        
+        # --- SHARED OUTPUT PATH ---
+        # Shared directory for files like scene.json
+        self.shared_annot_out = os.path.join(self.root, 'nuScenesFormat', 'anotations')
+
     
     def ensure_output_dirs(self):
-        import shutil
+        # This function prepares the SEQUENCE-SPECIFIC output dirs
+        # e.g., nuScenesFormat/nuSceneSeq10/data
+        # e.g., nuScenesFormat/nuSceneSeq10/anotations
         
-        # Clean up old output directories if they exist
+        # Clean up old sequence-specific output directories
         if os.path.exists(self.annot_out):
             try:
                 shutil.rmtree(self.annot_out)
@@ -248,20 +275,27 @@ class IDD3DDataLoader(BaseDataLoader):
                 pass
         
         if os.path.exists(self.out_data):
-            # Don't delete out_data entirely, just clean subdirectories
-            # This will be handled by individual converters
-            pass
+            try:
+                shutil.rmtree(self.out_data)
+            except Exception:
+                pass
         
         # Create fresh directories
         os.makedirs(self.out_data, exist_ok=True)
         os.makedirs(self.annot_out, exist_ok=True)
         os.makedirs(self.converted_lidar, exist_ok=True)
+        
+        # Also ensure the SHARED annotations directory exists
+        # e.g., nuScenesFormat/anotations
+        os.makedirs(self.shared_annot_out, exist_ok=True)
+
     
     def validate(self) -> dict:
+        # self.seq_base is now the full path to the source sequence
         if not os.path.exists(self.seq_base):
             return {'valid': False, 'error': f'Sequence path not found: {self.seq_base}'}
         
-        required_dirs = ['lidar', 'label', 'calib']
+        required_dirs = ['lidar', 'lable', 'calib'] # <-- Updated 'lable'
         missing = []
         for dir_name in required_dirs:
             dir_path = os.path.join(self.seq_base, dir_name)
@@ -269,8 +303,11 @@ class IDD3DDataLoader(BaseDataLoader):
                 missing.append(dir_name)
         
         if missing:
-            return {'valid': False, 'error': f'Missing directories: {", ".join(missing)}'}
+            return {'valid': False, 'error': f'Missing directories: {", ".join(missing)} in {self.seq_base}'}
         
+        if not os.path.exists(self.annot_json):
+             return {'valid': False, 'error': f'Missing file: {self.annot_json}'}
+
         lidar_count = len([f for f in os.listdir(self.lidar_dir) 
                           if f.lower().endswith('.pcd')])
         label_count = len([f for f in os.listdir(self.label_dir) 
@@ -292,8 +329,12 @@ class IDD3DDataLoader(BaseDataLoader):
     def read_annotations(self):
         if not os.path.exists(self.annot_json):
             return {}
-        with open(self.annot_json, 'r') as f:
-            return json.load(f)
+        try:
+            with open(self.annot_json, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error reading {self.annot_json}: {e}")
+            return {}
 
 
 class IDD3DLidarConverter(BaseConverter):
@@ -312,6 +353,7 @@ class IDD3DLidarConverter(BaseConverter):
             log_handler.log("Warning: open3d not available, creating placeholder files", 'warning')
         
         files = [os.path.basename(p) for p in data_loader.list_lidar_files()]
+        # Use new output path from data_loader
         dst_dir = data_loader.converted_lidar
         src_dir = data_loader.lidar_dir
         
@@ -319,15 +361,7 @@ class IDD3DLidarConverter(BaseConverter):
             log_handler.log("No LiDAR files found", 'warning')
             return
         
-        # CLEAN UP EXISTING CONVERTED_LIDAR DIRECTORY
-        if os.path.exists(dst_dir):
-            import shutil
-            log_handler.log(f"Cleaning up existing converted_lidar directory: {dst_dir}", "info")
-            try:
-                shutil.rmtree(dst_dir)
-                log_handler.log("Old converted_lidar directory removed", "success")
-            except Exception as e:
-                log_handler.log(f"Warning: Could not remove old converted_lidar directory: {str(e)}", "warning")
+        # CLEAN UP is handled by ensure_output_dirs
         
         # Create fresh directory
         os.makedirs(dst_dir, exist_ok=True)
@@ -355,6 +389,7 @@ class IDD3DLidarConverter(BaseConverter):
                 placeholders += 1
         
         log_handler.log(f"LiDAR conversion complete: {converted} converted, {placeholders} placeholders", 'success')
+        log_handler.log(f"  Output: {dst_dir}", 'info')
 
 
 class IDD3DCameraConverter(BaseConverter):
@@ -380,17 +415,10 @@ class IDD3DCameraConverter(BaseConverter):
         # Keep original camera naming - output folders: cam0, cam1, cam2, cam3, cam4, cam5
         camerachannels = ["cam0", "cam1", "cam2", "cam3", "cam4", "cam5"]
         
-        camdir = os.path.join(dataloader.out_data, "cam")
+        # Use new output path from data_loader
+        camdir = dataloader.cam_dir
         
-        # CLEAN UP EXISTING CAM DIRECTORY
-        if os.path.exists(camdir):
-            import shutil
-            loghandler.log(f"Cleaning up existing cam directory: {camdir}", "info")
-            try:
-                shutil.rmtree(camdir)
-                loghandler.log("Old cam directory removed", "success")
-            except Exception as e:
-                loghandler.log(f"Warning: Could not remove old cam directory: {str(e)}", "warning")
+        # CLEAN UP is handled by ensure_output_dirs
         
         # Create fresh cam directory
         os.makedirs(camdir, exist_ok=True)
@@ -430,6 +458,7 @@ class IDD3DCameraConverter(BaseConverter):
                     loghandler.log(f"Error converting {fname}: {str(e)}", "error")
         
         loghandler.log(f"Camera conversion complete: {converted} images converted to cam, {errors} errors", "success")
+        loghandler.log(f"  Output: {camdir}", 'info')
 
 
 class IDD3DCalibConverter(BaseConverter):
@@ -463,6 +492,7 @@ class IDD3DCalibConverter(BaseConverter):
                 "data": {}
             })
         
+        # Use new output path from data_loader
         out_calib_dir = os.path.join(data_loader.out_data, 'calibration')
         os.makedirs(out_calib_dir, exist_ok=True)
         
@@ -472,6 +502,7 @@ class IDD3DCalibConverter(BaseConverter):
             json.dump(sensors_j, f, indent=2)
         
         log_handler.log("Calibration stubs created", 'success')
+        log_handler.log(f"  Output: {out_calib_dir}", 'info')
 
 
 class IDD3DFrameConverter(BaseConverter):
@@ -530,22 +561,28 @@ class IDD3DFrameConverter(BaseConverter):
             
             frames.append(frame)
         
+        # Use new output path from data_loader
         out_path = os.path.join(data_loader.annot_out, 'frames.json')
         with open(out_path, 'w') as f:
             json.dump(frames, f, indent=2)
         
         log_handler.log(f"frames.json converted ({len(frames)} frames)", 'success')
+        log_handler.log(f"  Output: {out_path}", 'info')
 
 
 class IDD3DSceneConverter(BaseConverter):
-    """Generate scene.json with scene metadata"""
+    """
+    Generate and update a *shared* scene.json with scene metadata,
+    and also save a copy to the sequence-specific folder.
+    """
     
     def __init__(self, token_manager, sequence_name='seq'):
         super().__init__('scene')
         self.token_manager = token_manager
+        # Use the sequence_name (relative path) as a unique name
         self.sequence_name = sequence_name
     
-    def run(self, data_loader, log_handler):
+    def run(self, data_loader: IDD3DDataLoader, log_handler):
         annot_data = data_loader.read_annotations()
         if not annot_data:
             log_handler.log("No annotations found for scene conversion", 'warning')
@@ -566,30 +603,72 @@ class IDD3DSceneConverter(BaseConverter):
         first_sample_token = self.token_manager.get_frame_token(frame_ids[0])
         last_sample_token = self.token_manager.get_frame_token(frame_ids[-1])
         
-        # Try to get metadata from annot_data.json
-        first_frame_data = annot_data[frame_ids[0]]
-        
-        # Create scene entry following nuScenes schema
-        scene = {
+        # Create the new scene entry for *this* sequence
+        current_scene = {
             "token": scene_token,
             "log_token": log_token,
             "nbr_samples": None,
             "first_sample_token": first_sample_token,
             "last_sample_token": last_sample_token,
-            "name": self.sequence_name,
+            # Use the unique sequence path as the name
+            "name": self.sequence_name, 
             "description": f"IDD3D sequence {self.sequence_name}"
         }
         
-        # Save scene.json (as a list with single scene)
-        out_path = os.path.join(data_loader.annot_out, 'scene.json')
-        with open(out_path, 'w') as f:
-            json.dump([scene], f, indent=2)
+        # --- NEW LOGIC FOR SHARED scene.json ---
+        # Path to the "master" shared file
+        master_out_path = os.path.join(data_loader.shared_annot_out, 'scene.json')
+        # Path to the sequence-specific copy
+        seq_specific_out_path = os.path.join(data_loader.annot_out, 'scene.json')
         
-        log_handler.log(f"Scene file created", 'success')
-        log_handler.log(f"  Scene token: {scene_token}", 'info')
-        log_handler.log(f"  Number of samples: null (to be calculated)", 'info')
-        log_handler.log(f"  First sample token: {first_sample_token}", 'info')
-        log_handler.log(f"  Last sample token: {last_sample_token}", 'info')
+        scenes = []
+        
+        with scene_file_lock:
+            try:
+                # 1. Read existing shared scene.json if it exists
+                if os.path.exists(master_out_path):
+                    with open(master_out_path, 'r') as f:
+                        scenes = json.load(f)
+                        if not isinstance(scenes, list):
+                            scenes = []
+            except Exception as e:
+                log_handler.log(f"Could not read shared scene.json: {e}", 'warning')
+                scenes = []
+            
+            # 2. Check if this scene (by name) already exists and update it
+            found = False
+            for i, scene in enumerate(scenes):
+                if scene.get('name') == self.sequence_name:
+                    log_handler.log(f"Updating existing scene: {self.sequence_name}", 'info')
+                    scenes[i] = current_scene
+                    found = True
+                    break
+            
+            # 3. If not found, append it
+            if not found:
+                log_handler.log(f"Adding new scene: {self.sequence_name}", 'info')
+                scenes.append(current_scene)
+            
+            # 4. Write the updated list back to the SHARED file
+            try:
+                with open(master_out_path, 'w') as f:
+                    json.dump(scenes, f, indent=2)
+            except Exception as e:
+                log_handler.log(f"FATAL: Could not write to shared scene.json: {e}", 'error')
+                raise
+            
+            # 5. Write the updated list to the SEQUENCE-SPECIFIC file
+            try:
+                with open(seq_specific_out_path, 'w') as f:
+                    json.dump(scenes, f, indent=2)
+            except Exception as e:
+                log_handler.log(f"FATAL: Could not write to sequence-specific scene.json: {e}", 'error')
+                raise
+
+        log_handler.log(f"Shared scene.json updated ({len(scenes)} total scenes)", 'success')
+        log_handler.log(f"  Master file: {master_out_path}", 'info')
+        log_handler.log(f"  Sequence copy: {seq_specific_out_path}", 'info')
+        log_handler.log(f"  This scene token: {scene_token}", 'info')
 
 
 class IDD3DSampleDataConverter(BaseConverter):
@@ -678,14 +757,13 @@ class IDD3DSampleDataConverter(BaseConverter):
                 if i < len(sd_list) - 1:
                     sd['next'] = sd_list[i+1]['token']
         
-        # Save sample_data.json
+        # Save sample_data.json to sequence-specific folder
         out_path = os.path.join(data_loader.annot_out, 'sample_data.json')
         with open(out_path, 'w') as f:
             json.dump(sample_data_list, f, indent=2)
         
         log_handler.log(f"Sample data file created with {len(sample_data_list)} entries", 'success')
-        log_handler.log(f"  LiDAR entries: {len(frame_ids)}", 'info')
-        log_handler.log(f"  Camera entries: {len(frame_ids) * 6}", 'info')
+        log_handler.log(f"  Output: {out_path}", 'info')
 
 
 class IDD3DCategoryConverter(BaseConverter):
@@ -749,14 +827,13 @@ class IDD3DCategoryConverter(BaseConverter):
             }
             categories.append(category)
         
-        # Save category.json
+        # Save category.json to sequence-specific folder
         out_path = os.path.join(data_loader.annot_out, 'category.json')
         with open(out_path, 'w') as f:
             json.dump(categories, f, indent=2)
         
         log_handler.log(f"Category file created with {len(categories)} static categories", 'success')
-        for cat in categories:
-            log_handler.log(f"  - Generated: {cat['name']} (token: ...{cat['token'][-6:]})", 'info')
+        log_handler.log(f"  Output: {out_path}", 'info')
 
 
 class IDD3DSampleConverter(BaseConverter):
@@ -802,14 +879,13 @@ class IDD3DSampleConverter(BaseConverter):
             
             samples.append(sample)
         
-        # Save sample.json
+        # Save sample.json to sequence-specific folder
         out_path = os.path.join(data_loader.annot_out, 'sample.json')
         with open(out_path, 'w') as f:
             json.dump(samples, f, indent=2)
         
         log_handler.log(f"Sample file created with {len(samples)} samples", 'success')
-        log_handler.log(f"  Frame rate: {self.token_manager.frame_rate_hz} Hz", 'info')
-        log_handler.log(f"  Timestamp range: {samples[0]['timestamp']} - {samples[-1]['timestamp']}", 'info')
+        log_handler.log(f"  Output: {out_path}", 'info')
 
 
 class IDD3DSampleAnnotationConverter(BaseConverter):
@@ -936,12 +1012,13 @@ class IDD3DSampleAnnotationConverter(BaseConverter):
                     ann['next'] = annotations[i+1]['token']
                 sample_annotations.append(ann)
         
-        # Save sample_annotation.json
+        # Save sample_annotation.json to sequence-specific folder
         out_path = os.path.join(data_loader.annot_out, 'sample_annotation.json')
         with open(out_path, 'w') as f:
             json.dump(sample_annotations, f, indent=2)
         
         log_handler.log(f"Sample annotation file created with {len(sample_annotations)} annotations", 'success')
+        log_handler.log(f"  Output: {out_path}", 'info')
 
 
 class IDD3DInstanceConverter(BaseConverter):
@@ -1053,12 +1130,13 @@ class IDD3DInstanceConverter(BaseConverter):
         for obj_type, count in sorted(obj_type_counts.items()):
             log_handler.log(f"  - {obj_type}: {count} instances", 'info')
         
-        # Save instance.json
+        # Save instance.json to sequence-specific folder
         out_path = os.path.join(data_loader.annot_out, 'instance.json')
         with open(out_path, 'w') as f:
             json.dump(instances, f, indent=2)
         
         log_handler.log(f"Instance file created with {len(instances)} instances", 'success')
+        log_handler.log(f"  Output: {out_path}", 'info')
 
 
 class IDD3DObjectsJsonConverter(BaseConverter):
@@ -1189,10 +1267,7 @@ class IDD3DObjectsJsonConverter(BaseConverter):
                 loghandler.log(f"Error processing frame {frame_id}: {str(e)}", 'warning')
                 continue
         
-        # Ensure output directory exists
-        os.makedirs(dataloader.annot_out, exist_ok=True)
-        
-        # Save objects.json
+        # Save objects.json to sequence-specific folder
         out_path = os.path.join(dataloader.annot_out, 'objects.json')
         
         try:
@@ -1200,8 +1275,7 @@ class IDD3DObjectsJsonConverter(BaseConverter):
                 json.dump(objects_list, f, indent=2)
             
             loghandler.log(f"objects.json created with {len(objects_list)} 3D bounding boxes", "success")
-            loghandler.log(f"Tracked {len(self.token_manager.instance_tokens)} unique instances", "info")
-            loghandler.log(f"Output saved to: {out_path}", "success")
+            loghandler.log(f"  Output: {out_path}", "success")
                 
         except Exception as e:
             loghandler.log(f"Error writing objects.json: {str(e)}", 'error')
@@ -1231,7 +1305,6 @@ class IDD3DTimestampSyncConverter(BaseConverter):
         log_handler.log(f"Timestamps already synced via TokenTimestampManager", 'info')
         log_handler.log(f"  Base timestamp: {self.token_manager.base_timestamp} μs", 'info')
         log_handler.log(f"  Frame rate: {self.token_manager.frame_rate_hz} Hz", 'info')
-        log_handler.log(f"  Frame interval: {self.token_manager.frame_interval_us} μs", 'info')
         
         # Update frames.json with synced timestamps (if it exists)
         frames_path = os.path.join(data_loader.annot_out, 'frames.json')
@@ -1317,7 +1390,7 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
     pipeline = DatasetConversionPipeline('idd3d', 'nuscenes')
     
     conversions = config.get('conversions', {})
-    sequence_name = config.get('sequence_id', 'seq_10')
+    sequence_name = config.get('sequence_id', 'idd3d_seq10')
     
     # Create token manager with 10Hz frame rate for IDD3D
     token_manager = TokenTimestampManager(frame_rate_hz=10)
@@ -1334,7 +1407,7 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
     if conversions.get('category', False):
         pipeline.add_converter(IDD3DCategoryConverter(token_manager))
     
-    # PHASE 3: Scene (creates scene_token for samples)
+    # PHASE 3: Scene (creates *shared* scene.json)
     if conversions.get('scene', False):
         pipeline.add_converter(IDD3DSceneConverter(token_manager, sequence_name))
     
@@ -1386,12 +1459,18 @@ def validate_paths():
     """Validate dataset paths"""
     data = request.json
     source = data.get('source', 'idd3d')
+    # root_path is the project root, e.g., /home/siddharthb9/Desktop/nuSceneses&IDD3D
     root_path = data.get('root_path')
-    sequence_id = data.get('sequence_id', '20220118103308_seq_10')
+    # sequence_id is the RELATIVE PATH from root_path to the sequence
+    # e.g., idd3d_seq10
+    sequence_id = data.get('sequence_id')
     
     if not root_path or not os.path.exists(root_path):
         return jsonify({'valid': False, 'error': f'Root path does not exist: {root_path}'}), 400
     
+    if not sequence_id:
+        return jsonify({'valid': False, 'error': 'Sequence ID (relative path) is required'}), 400
+
     if source == 'idd3d':
         loader = IDD3DDataLoader(root_path, sequence_id)
         validation = loader.validate()
@@ -1412,10 +1491,11 @@ def convert_stream():
     source = data.get('source', 'idd3d')
     target = data.get('target', 'nuscenes')
     root_path = data.get('root_path')
-    sequence_id = data.get('sequence_id', '20220118103308_seq_10')
+    sequence_id = data.get('sequence_id')
     conversions = data.get('conversions', {})
     
     def generate():
+        loader = None
         try:
             while not conversion_state['logs'].empty():
                 conversion_state['logs'].get()
@@ -1423,8 +1503,8 @@ def convert_stream():
             log_handler = LogHandler(conversion_state['logs'])
             
             log_handler.log(f"Starting conversion: {source} → {target}", 'info')
-            log_handler.log(f"Root path: {root_path}", 'info')
-            log_handler.log(f"Sequence ID: {sequence_id}", 'info')
+            log_handler.log(f"Project Root: {root_path}", 'info')
+            log_handler.log(f"Sequence Path: {sequence_id}", 'info')
             
             # Create data loader
             if source == 'idd3d':
@@ -1432,7 +1512,9 @@ def convert_stream():
             else:
                 raise ValueError(f"Unknown source dataset: {source}")
             
+            # This prepares the 'nuScenesFormat/nuSceneSeq<ID>' directory
             loader.ensure_output_dirs()
+            log_handler.log(f"Outputting to: {loader.output_base}", 'info')
             
             # Build and run pipeline
             pipeline = ConverterRegistry.get_pipeline(
@@ -1446,7 +1528,8 @@ def convert_stream():
             else:
                 pipeline.run(loader, log_handler)
                 log_handler.log("Conversion pipeline completed successfully!", 'success')
-                log_handler.log(f"Output directory: {root_path}/Intermediate_format/", 'info')
+                log_handler.log(f"Output for '{sequence_id}' is in: {loader.output_base}", 'success')
+                log_handler.log(f"Shared 'scene.json' is in: {loader.shared_annot_out}", 'success')
         
         except Exception as e:
             log_handler.log(f"Conversion failed: {str(e)}", 'error')

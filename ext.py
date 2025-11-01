@@ -223,26 +223,35 @@ class DatasetConversionPipeline:
 class IDD3DDataLoader(BaseDataLoader):
     """
     Loader for IDD3D dataset.
-    Expects 'root' to be the project root and 'sequence' to be the 
-    relative path to the specific sequence folder from the root.
+    Expects 'sequence_path' to be the full, absolute path to the sequence folder.
     """
     
-    def __init__(self, root: str, sequence: str = 'idd3d_seq10'):
-        # 'root' is the project root (e.g., /home/siddharthb9/Desktop/nuSceneses&IDD3D)
-        # 'sequence' is the RELATIVE PATH to the sequence data
-        # (e.g., idd3d_seq10)
-        super().__init__(root, sequence)
+    def __init__(self, sequence_path: str):
         
-        # --- INPUT PATHS ---
-        # self.seq_base is the full path to the SOURCE sequence folder
-        self.seq_base = os.path.join(self.root, self.sequence)
+        # --- NEW INITIALIZATION ---
+        # self.seq_base is the full, absolute path to the SOURCE sequence folder
+        # e.g., /home/siddharthb9/Desktop/nuSceneses&IDD3D/idd3d_seq10
+        self.seq_base = os.path.abspath(sequence_path)
         
+        # self.root is the parent project directory
+        # e.g., /home/siddharthb9/Desktop/nuSceneses&IDD3D
+        root_path = os.path.dirname(self.seq_base)
+        
+        # self.sequence is the short name of the sequence
+        # e.g., idd3d_seq10
+        sequence_name = os.path.basename(self.seq_base)
+        
+        super().__init__(root_path, sequence_name)
+        # --- END OF NEW INITIALIZATION ---
+
+        
+        # --- INPUT PATHS (Based on self.seq_base) ---
         self.lidar_dir = os.path.join(self.seq_base, 'lidar')
-        self.label_dir = os.path.join(self.seq_base, 'lable') # <-- CHANGED from 'label'
+        self.label_dir = os.path.join(self.seq_base, 'lable') # Your 'lable' spelling
         self.calib_dir = os.path.join(self.seq_base, 'calib')
-        self.annot_json = os.path.join(self.seq_base, 'annot_data.json') # <-- CHANGED from 'annot.json'
+        self.annot_json = os.path.join(self.seq_base, 'annot_data.json') # Your 'annot_data.json'
         
-        # --- OUTPUT PATHS ---
+        # --- OUTPUT PATHS (Based on self.root and self.sequence) ---
         # Get short sequence name (e.g., 'idd3d_seq8' -> '8', 'idd3d_seq10' -> '10')
         seq_short_name = self.sequence.split(os.path.sep)[-1]
         seq_num = seq_short_name.split('_')[-1] # This will get '10' from 'idd3d_seq10'
@@ -295,7 +304,7 @@ class IDD3DDataLoader(BaseDataLoader):
         if not os.path.exists(self.seq_base):
             return {'valid': False, 'error': f'Sequence path not found: {self.seq_base}'}
         
-        required_dirs = ['lidar', 'lable', 'calib'] # <-- Updated 'lable'
+        required_dirs = ['lidar', 'lable', 'calib'] # Updated 'lable'
         missing = []
         for dir_name in required_dirs:
             dir_path = os.path.join(self.seq_base, dir_name)
@@ -579,7 +588,7 @@ class IDD3DSceneConverter(BaseConverter):
     def __init__(self, token_manager, sequence_name='seq'):
         super().__init__('scene')
         self.token_manager = token_manager
-        # Use the sequence_name (relative path) as a unique name
+        # Use the sequence_name (e.g., 'idd3d_seq10') as a unique name
         self.sequence_name = sequence_name
     
     def run(self, data_loader: IDD3DDataLoader, log_handler):
@@ -610,7 +619,7 @@ class IDD3DSceneConverter(BaseConverter):
             "nbr_samples": None,
             "first_sample_token": first_sample_token,
             "last_sample_token": last_sample_token,
-            # Use the unique sequence path as the name
+            # Use the unique sequence name (e.g., 'idd3d_seq10')
             "name": self.sequence_name, 
             "description": f"IDD3D sequence {self.sequence_name}"
         }
@@ -1459,20 +1468,18 @@ def validate_paths():
     """Validate dataset paths"""
     data = request.json
     source = data.get('source', 'idd3d')
-    # root_path is the project root, e.g., /home/siddharthb9/Desktop/nuSceneses&IDD3D
-    root_path = data.get('root_path')
-    # sequence_id is the RELATIVE PATH from root_path to the sequence
-    # e.g., idd3d_seq10
-    sequence_id = data.get('sequence_id')
     
-    if not root_path or not os.path.exists(root_path):
-        return jsonify({'valid': False, 'error': f'Root path does not exist: {root_path}'}), 400
+    # --- NEW: Use single sequence_path ---
+    sequence_path = data.get('sequence_path')
     
-    if not sequence_id:
-        return jsonify({'valid': False, 'error': 'Sequence ID (relative path) is required'}), 400
-
+    if not sequence_path:
+        return jsonify({'valid': False, 'error': 'Sequence Path is required'}), 400
+    
+    if not os.path.exists(sequence_path):
+        return jsonify({'valid': False, 'error': f'Sequence Path does not exist: {sequence_path}'}), 400
+    
     if source == 'idd3d':
-        loader = IDD3DDataLoader(root_path, sequence_id)
+        loader = IDD3DDataLoader(sequence_path)
         validation = loader.validate()
         return jsonify(validation)
     
@@ -1490,8 +1497,9 @@ def convert_stream():
     data = request.json
     source = data.get('source', 'idd3d')
     target = data.get('target', 'nuscenes')
-    root_path = data.get('root_path')
-    sequence_id = data.get('sequence_id')
+    
+    # --- NEW: Use single sequence_path ---
+    sequence_path = data.get('sequence_path')
     conversions = data.get('conversions', {})
     
     def generate():
@@ -1503,12 +1511,11 @@ def convert_stream():
             log_handler = LogHandler(conversion_state['logs'])
             
             log_handler.log(f"Starting conversion: {source} → {target}", 'info')
-            log_handler.log(f"Project Root: {root_path}", 'info')
-            log_handler.log(f"Sequence Path: {sequence_id}", 'info')
+            log_handler.log(f"Sequence Path: {sequence_path}", 'info')
             
             # Create data loader
             if source == 'idd3d':
-                loader = IDD3DDataLoader(root_path, sequence_id)
+                loader = IDD3DDataLoader(sequence_path)
             else:
                 raise ValueError(f"Unknown source dataset: {source}")
             
@@ -1517,9 +1524,10 @@ def convert_stream():
             log_handler.log(f"Outputting to: {loader.output_base}", 'info')
             
             # Build and run pipeline
+            # We get 'sequence_id' (e.g., 'idd3d_seq10') from the loader
             pipeline = ConverterRegistry.get_pipeline(
                 source, target,
-                {'conversions': conversions, 'sequence_id': sequence_id}
+                {'conversions': conversions, 'sequence_id': loader.sequence}
             )
             conversion_state['total_steps'] = len(pipeline.converters)
             
@@ -1528,7 +1536,7 @@ def convert_stream():
             else:
                 pipeline.run(loader, log_handler)
                 log_handler.log("Conversion pipeline completed successfully!", 'success')
-                log_handler.log(f"Output for '{sequence_id}' is in: {loader.output_base}", 'success')
+                log_handler.log(f"Output for '{loader.sequence}' is in: {loader.output_base}", 'success')
                 log_handler.log(f"Shared 'scene.json' is in: {loader.shared_annot_out}", 'success')
         
         except Exception as e:

@@ -331,9 +331,7 @@
         </div>
 
         <div class="grid">
-            <!-- Left Column -->
             <div class="column-left">
-                <!-- Source Dataset -->
                 <div class="card">
                     <h2>Source Dataset</h2>
                     <div class="form-group">
@@ -349,7 +347,6 @@
                     </div>
                 </div>
 
-                <!-- Target Dataset -->
                 <div class="card">
                     <h2>Target Format</h2>
                     <div class="form-group">
@@ -365,25 +362,18 @@
                     </div>
                 </div>
 
-                <!-- Paths -->
                 <div class="card">
                     <h2>Paths</h2>
                     <div class="form-group">
-                        <label>Root Directory</label>
-                        <input type="text" id="rootPath" value="/home/siddharthb9/Desktop/nuSceneses&IDD3D">
-                    </div>
-                    <div class="form-group">
-                        <label>Sequence ID</label>
-                        <input type="text" id="sequenceId" value="20220118103308_seq_10">
+                        <label>Sequence Path (Absolute Path)</label>
+                        <input type="text" id="sequencePath" value="/home/siddharthb9/Desktop/nuSceneses&IDD3D/idd3d_seq10">
                     </div>
                     <button class="button secondary" id="validateBtn" onclick="validatePaths()">Validate Paths</button>
                     <div id="validationResult" style="margin-top: 12px;"></div>
                 </div>
             </div>
 
-            <!-- Right Column -->
             <div class="column-right">
-                <!-- Conversion Modules -->
                 <div class="card">
                     <h2>Conversion Modules</h2>
                     <div class="checkbox-group">
@@ -408,11 +398,26 @@
                                 <p>Generate sensor calibration</p>
                             </div>
                         </label>
+                        
                         <label class="checkbox-item checked">
-                            <input type="checkbox" name="conv" value="annot" checked>
+                            <input type="checkbox" name="conv" value="log" checked>
                             <div class="checkbox-label">
-                                <p>Annotations</p>
-                                <p>Convert frame annotations</p>
+                                <p>Log (Stub)</p>
+                                <p>Generate log.json metadata</p>
+                            </div>
+                        </label>
+                         <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="ego_pose" checked>
+                            <div class="checkbox-label">
+                                <p>Ego Pose (Stub)</p>
+                                <p>Generate ego_pose.json</p>
+                            </div>
+                        </label>
+                         <label class="checkbox-item checked">
+                            <input type="checkbox" name="conv" value="map" checked>
+                            <div class="checkbox-label">
+                                <p>Map (Stub)</p>
+                                <p>Generate empty map.json</p>
                             </div>
                         </label>
                         <label class="checkbox-item checked">
@@ -451,31 +456,10 @@
                             </div>
                         </label>
                         <label class="checkbox-item checked">
-                            <input type="checkbox" name="conv" value="attribute" checked>
-                            <div class="checkbox-label">
-                                <p>Attribute</p>
-                                <p>Generate object attributes</p>
-                            </div>
-                        </label>
-                        <label class="checkbox-item checked">
-                            <input type="checkbox" name="conv" value="visibility" checked>
-                            <div class="checkbox-label">
-                                <p>Visibility</p>
-                                <p>Generate visibility levels</p>
-                            </div>
-                        </label>
-                        <label class="checkbox-item checked">
                             <input type="checkbox" name="conv" value="instance" checked>
                             <div class="checkbox-label">
                                 <p>Instance</p>
                                 <p>Generate instance.json (track objects)</p>
-                            </div>
-                        </label>
-                        <label class="checkbox-item checked">
-                            <input type="checkbox" name="conv" value="objects" checked>
-                            <div class="checkbox-label">
-                                <p>Objects (3D Bounding Boxes)</p>
-                                <p>Generate objects.json with bbox_3d format</p>
                             </div>
                         </label>
                     </div>
@@ -495,7 +479,6 @@
                     <button class="button primary" id="startBtn" onclick="startConversion()" style="margin-top: 20px;">▶ Start Conversion</button>
                 </div>
 
-                <!-- Logs -->
                 <div class="card">
                     <h2>Conversion Log</h2>
                     <div class="logs" id="logsContainer">
@@ -509,19 +492,6 @@
     <script>
         const API_BASE = 'http://localhost:5001/api';
         let isRunning = false;
-
-        const datasets = {
-            idd3d: {
-                name: 'IDD3D (Indian Dataset)',
-                description: '6 cameras, 1 LiDAR, GPS - 10Hz camera, 10Hz LiDAR',
-                sensors: '6 RGB cameras, 64-channel LiDAR, GPS'
-            },
-            nuscenes: {
-                name: 'nuScenes',
-                description: '6 cameras, 1 LiDAR, 5 RADARs, GPS/IMU - 12Hz camera, 20Hz LiDAR',
-                sensors: '6 cameras, Velodyne HDL-32E, 5 RADARs, GPS/IMU'
-            }
-        };
 
         // Update checkbox styling on change
         document.querySelectorAll('input[name="conv"]').forEach(checkbox => {
@@ -542,7 +512,7 @@
                 logsContainer.innerHTML = '';
             }
 
-            // Prefer backend-provided timestamp if available (ext.py provides a "timestamp" string)
+            // Prefer backend-provided timestamp if available
             const timestamp = backendTs ? backendTs : new Date().toLocaleTimeString();
             const logLine = document.createElement('div');
             logLine.className = `log-line ${type}`;
@@ -553,8 +523,7 @@
         }
 
         async function validatePaths() {
-            const rootPath = document.getElementById('rootPath').value;
-            const sequenceId = document.getElementById('sequenceId').value;
+            const sequencePath = document.getElementById('sequencePath').value;
             const resultDiv = document.getElementById('validationResult');
 
             document.getElementById('validateBtn').disabled = true;
@@ -563,7 +532,9 @@
                 const response = await fetch(`${API_BASE}/validate-paths`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ root_path: rootPath, sequence_id: sequenceId })
+                    body: JSON.stringify({ 
+                        sequence_path: sequencePath 
+                    })
                 });
 
                 const data = await response.json();
@@ -571,7 +542,7 @@
                 if (data.valid) {
                     resultDiv.innerHTML = `
                         <div class="info-box green">
-                            <strong>✓ Paths valid</strong>
+                            <strong>Paths valid</strong>
                             LiDAR files: ${data.lidar_files}<br>
                             Label files: ${data.label_files}
                         </div>
@@ -579,7 +550,7 @@
                 } else {
                     resultDiv.innerHTML = `
                         <div class="info-box red">
-                            <strong>✗ Validation failed</strong>
+                            <strong>Validation failed</strong>
                             ${data.error}
                         </div>
                     `;
@@ -599,16 +570,14 @@
         async function startConversion() {
             if (isRunning) return;
 
-            const rootPath = document.getElementById('rootPath').value;
-            const sequenceId = document.getElementById('sequenceId').value;
+            const sequencePath = document.getElementById('sequencePath').value;
 
-            if (!rootPath.trim()) {
-                addLog('Error: Root path is required', 'error');
+            if (!sequencePath.trim()) {
+                addLog('Error: Sequence path is required', 'error');
                 return;
             }
 
             const conversions = {};
-            // Note: timestamp_sync input is disabled so it will be excluded automatically
             document.querySelectorAll('input[name="conv"]:not(:disabled)').forEach(checkbox => {
                 conversions[checkbox.value] = checkbox.checked;
             });
@@ -625,8 +594,7 @@
             document.getElementById('logsContainer').innerHTML = '';
 
             addLog(`Starting conversion: idd3d → nuscenes`, 'info');
-            addLog(`Root path: ${rootPath}`, 'info');
-            addLog(`Sequence ID: ${sequenceId}`, 'info');
+            addLog(`Sequence Path: ${sequencePath}`, 'info');
             addLog(`Active conversions: ${Object.keys(conversions).filter(k => conversions[k]).join(', ')}`, 'info');
 
             try {
@@ -634,8 +602,7 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        root_path: rootPath,
-                        sequence_id: sequenceId,
+                        sequence_path: sequencePath,
                         conversions: conversions,
                         source: 'idd3d',
                         target: 'nuscenes'
@@ -665,12 +632,10 @@
                         if (line.startsWith('data: ')) {
                             try {
                                 const logEntry = JSON.parse(line.slice(6));
-                                // ext.py sends entries with fields: timestamp, message, type
                                 if (logEntry.type === 'complete') {
                                     document.getElementById('progressFill').style.width = '100%';
                                     document.getElementById('progressPercent').textContent = '100%';
                                 } else {
-                                    // Pass backend timestamp to addLog when available
                                     addLog(logEntry.message, logEntry.type, logEntry.timestamp || null);
                                 }
                             } catch (e) {
@@ -680,8 +645,8 @@
                     }
                 }
 
-                addLog('✓ Conversion completed successfully!', 'success');
-                addLog(`Output directory: ${rootPath}/Intermediate_format/`, 'info');
+                addLog('Conversion completed successfully!', 'success');
+
             } catch (error) {
                 addLog(`Error: ${error.message}`, 'error');
             } finally {

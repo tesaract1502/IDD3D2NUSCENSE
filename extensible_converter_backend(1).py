@@ -81,61 +81,56 @@ def append_to_json_list(file_path, new_data_list, log_handler):
             log_handler.log(f"FATAL: Could not write to {file_path}: {e}", 'error')
             raise
 
-# TOKEN AND TIMESTAMP MANAGER (NOW PERSISTENT)
+# TOKEN AND TIMESTAMP MANAGER (PERSISTENT)
 
 class TokenTimestampManager:
     """
     Manages consistent token generation and timestamp synchronization
     across all converted files for the intermediate format.
-    
-    --- UPDATED ---
-    Now loads from a registry path to be persistent across runs.
+    Loads from a registry path to be persistent across runs.
     """
     
     def __init__(self, registry_path=None, base_timestamp=None, frame_rate_hz=10):
-        """
-        Initialize the manager.
-        
-        Args:
-            registry_path: Path to the token_registry.json to load from.
-            base_timestamp: Starting timestamp in microseconds (default: current time)
-            frame_rate_hz: Frame rate in Hz (default: 10 for IDD3D)
-        """
         self.frame_rate_hz = frame_rate_hz
-        self.frame_interval_us = int(1_000_000 / self.frame_rate_hz)  # microseconds between frames
+        self.frame_interval_us = int(1_000_000 / self.frame_rate_hz)
         
         if base_timestamp is None:
-            self.base_timestamp = 1640995200000000  # microseconds
+            self.base_timestamp = 1640995200000000
         else:
             self.base_timestamp = base_timestamp
         
-        # Token registries - store tokens by ID for consistency
+        # --- CRITICAL FIX ---
+        # Local tokens (frame, instance) are ALWAYS new for each run.
         self.frame_tokens = {}
         self.instance_tokens = {}
+        self.scene_token = None
+        
+        # Global tokens (category, sensor) are loaded from the registry.
         self.category_tokens = {}
         self.sensor_tokens = {}
         self.calibration_tokens = {}
-        self.scene_token = None # Scene tokens are specific to a run
         
         self.registry_path = registry_path
         self.load_registry()
         
     def load_registry(self):
-        """Loads tokens from the registry path if it exists."""
+        """
+        --- CRITICAL FIX ---
+        Loads ONLY global tokens (category, sensor, calibration)
+        from the registry path if it exists.
+        """
         if self.registry_path and os.path.exists(self.registry_path):
             try:
                 with open(self.registry_path, 'r') as f:
                     registry = json.load(f)
                 
-                self.frame_tokens = registry.get('frame_tokens', {})
-                self.instance_tokens = registry.get('instance_tokens', {})
+                # Load ONLY global tokens
                 self.category_tokens = registry.get('category_tokens', {})
                 self.sensor_tokens = registry.get('sensor_tokens', {})
                 self.calibration_tokens = registry.get('calibration_tokens', {})
                 
-                logger.info(f"Loaded {len(self.frame_tokens)} frame tokens from registry.")
-                logger.info(f"Loaded {len(self.instance_tokens)} instance tokens from registry.")
-                logger.info(f"Loaded {len(self.category_tokens)} category tokens from registry.")
+                logger.info(f"Loaded {len(self.category_tokens)} global category tokens from registry.")
+                logger.info(f"Loaded {len(self.sensor_tokens)} global sensor tokens from registry.")
 
             except Exception as e:
                 logger.warning(f"Could not load token registry: {e}")
@@ -144,82 +139,57 @@ class TokenTimestampManager:
 
     
     def get_timestamp(self, frame_index):
-        """
-        Generate timestamp for a frame based on its index.
-        """
-        # We need a way to make timestamps unique per sequence.
-        # We'll use the scene_token (which is unique per run) as a base.
-        # A simpler way: just offset. Let's assume a 20s gap between sequences.
-        # No, the simplest way is to use the *existing* logic. The timestamp
-        # is relative to the *start* of the sequence, which is fine.
-        # `sample.timestamp` should be globally unique, though.
-        # Let's use the number of *existing* frames as an offset.
-        
-        # --- Re-thinking timestamp ---
-        # The user's `ego_pose` and `sample` timestamps must be globally unique.
-        # Our manager is re-created on every run.
-        # We need to pass in an offset.
-        
-        # Let's adjust the `get_timestamp` logic.
-        # The `base_timestamp` will be dynamically calculated.
-        # Let's use the number of existing frames in `sample.json`
-        
-        # New plan: The *pipeline builder* will check `sample.json`,
-        # get the last timestamp, and pass a *new* `base_timestamp`
-        # to this manager.
-        
         return self.base_timestamp + (frame_index * self.frame_interval_us)
     
     def get_frame_token(self, frame_id):
-        """Get or create a consistent token for a frame."""
+        # Frame tokens are local to this run, do not check registry
         if frame_id not in self.frame_tokens:
             self.frame_tokens[frame_id] = uuid.uuid4().hex
         return self.frame_tokens[frame_id]
     
     def get_instance_token(self, obj_id):
-        """Get or create a consistent token for an object instance."""
+        # Instance tokens are local to this run, do not check registry
         if obj_id not in self.instance_tokens:
             self.instance_tokens[obj_id] = uuid.uuid4().hex
         return self.instance_tokens[obj_id]
     
     def get_category_token(self, category_name):
-        """Get or create a consistent token for a category."""
+        # Category tokens ARE global
         if category_name not in self.category_tokens:
             self.category_tokens[category_name] = uuid.uuid4().hex
         return self.category_tokens[category_name]
     
     def get_sensor_token(self, sensor_name):
-        """Get or create a consistent token for a sensor."""
+        # Sensor tokens ARE global
         if sensor_name not in self.sensor_tokens:
             self.sensor_tokens[sensor_name] = uuid.uuid4().hex
         return self.sensor_tokens[sensor_name]
     
     def get_calibration_token(self, sensor_name):
-        """Get or create a consistent token for sensor calibration."""
+        # Calibration tokens ARE global
         if sensor_name not in self.calibration_tokens:
             self.calibration_tokens[sensor_name] = uuid.uuid4().hex
         return self.calibration_tokens[sensor_name]
     
     def get_scene_token(self):
-        """Get or create the scene token."""
-        # Scene token is *always* new for a given run
         if self.scene_token is None:
             self.scene_token = uuid.uuid4().hex
         return self.scene_token
     
     def generate_annotation_token(self):
-        """Generate a unique token for an annotation (not tracked)."""
         return uuid.uuid4().hex
     
     def save_registry(self, output_path):
-        """Save the token registry to a JSON file for debugging."""
+        """
+        --- CRITICAL FIX ---
+        Save ONLY global tokens (category, sensor, calibration) to the registry.
+        """
         registry = {
+            # Save metadata
             'base_timestamp': self.base_timestamp,
             'frame_rate_hz': self.frame_rate_hz,
-            'frame_interval_us': self.frame_interval_us,
-            'scene_token': self.scene_token,
-            'frame_tokens': self.frame_tokens,
-            'instance_tokens': self.instance_tokens,
+            
+            # Save ONLY global tokens
             'category_tokens': self.category_tokens,
             'sensor_tokens': self.sensor_tokens,
             'calibration_tokens': self.calibration_tokens
@@ -228,7 +198,7 @@ class TokenTimestampManager:
         try:
             with open(output_path, 'w') as f:
                 json.dump(registry, f, indent=2)
-            logger.info(f"Token registry saved to {output_path}")
+            logger.info(f"Global token registry saved to {output_path}")
         except Exception as e:
             logger.error(f"Failed to save token registry: {e}")
 
@@ -244,12 +214,10 @@ class BaseDataLoader(ABC):
     
     @abstractmethod
     def ensure_output_dirs(self):
-        """Create necessary output directories"""
         pass
     
     @abstractmethod
     def validate(self) -> dict:
-        """Validate dataset structure. Return {'valid': bool, 'error': str, ...}"""
         pass
 
 
@@ -262,7 +230,6 @@ class BaseConverter(ABC):
     
     @abstractmethod
     def run(self, data_loader: BaseDataLoader, log_handler: LogHandler):
-        """Execute conversion. Must be implemented by subclasses."""
         pass
 
 
@@ -275,12 +242,10 @@ class DatasetConversionPipeline:
         self.converters = []
     
     def add_converter(self, converter: BaseConverter):
-        """Add a converter to the pipeline"""
         self.converters.append(converter)
         return self
     
     def run(self, data_loader: BaseDataLoader, log_handler: LogHandler):
-        """Execute all converters in sequence"""
         if not self.converters:
             log_handler.log("No converters in pipeline", "warning")
             return
@@ -298,16 +263,24 @@ class DatasetConversionPipeline:
                 raise
 
 
+# --- MAPPING for new folder structure ---
+IDD3D_TO_NUSCENES_CAM_MAP = {
+    "cam0": "CAM_FRONT_LEFT",
+    "cam1": "CAM_BACK_RIGHT",
+    "cam2": "CAM_FRONT_RIGHT",
+    "cam3": "CAM_FRONT",
+    "cam4": "CAM_BACK_LEFT",
+    "cam5": "CAM_BACK"
+}
+LIDAR_CHANNEL = "LIDAR"
+
 # IDD3D IMPLEMENTATION
 
 class IDD3DDataLoader(BaseDataLoader):
     """
     Loader for IDD3D dataset.
     Expects 'sequence_path' to be the full, absolute path to the sequence folder.
-    
-    --- UPDATED ---
-    All output paths now point to a single 'nuScenesFormat' directory
-    for appending/merging.
+    All output paths now point to a single 'nuScenesFormat' directory.
     """
     
     def __init__(self, sequence_path: str):
@@ -326,34 +299,38 @@ class IDD3DDataLoader(BaseDataLoader):
         
         # --- UNIFIED OUTPUT PATHS ---
         self.output_base = os.path.join(self.root, 'nuScenesFormat')
-        self.out_data = os.path.join(self.output_base, 'data')
         self.annot_out = os.path.join(self.output_base, 'anotations')
-        self.converted_lidar = os.path.join(self.out_data, 'lidar')
-        self.cam_dir = os.path.join(self.out_data, 'cam')
+        
+        # --- NEW: 'samples' folder ---
+        self.samples_dir = os.path.join(self.output_base, 'samples')
+        self.converted_lidar = os.path.join(self.samples_dir, LIDAR_CHANNEL)
         
         # Path for the persistent token registry
         self.token_registry_path = os.path.join(self.annot_out, 'token_registry.json')
 
     
     def ensure_output_dirs(self):
-        # --- UPDATED ---
         # This function NO LONGER DELETES. It only ensures directories exist.
-        os.makedirs(self.out_data, exist_ok=True)
+        
+        # Create 'anotations' folder
         os.makedirs(self.annot_out, exist_ok=True)
+        
+        # Create 'samples' folder
+        os.makedirs(self.samples_dir, exist_ok=True)
+        
+        # Create 'LIDAR' subfolder
         os.makedirs(self.converted_lidar, exist_ok=True)
         
-        # Also create subdirs for cameras
-        for i in range(6):
-            os.makedirs(os.path.join(self.cam_dir, f"cam {i}"), exist_ok=True)
-        # Also create calibration dir
-        os.makedirs(os.path.join(self.out_data, 'calibration'), exist_ok=True)
+        # Create all camera subfolders
+        for cam_channel in IDD3D_TO_NUSCENES_CAM_MAP.values():
+            os.makedirs(os.path.join(self.samples_dir, cam_channel), exist_ok=True)
 
     
     def validate(self) -> dict:
         if not os.path.exists(self.seq_base):
             return {'valid': False, 'error': f'Sequence path not found: {self.seq_base}'}
         
-        required_dirs = ['lidar', 'lable', 'calib'] # Updated 'lable'
+        required_dirs = ['lidar', 'lable', 'calib']
         missing = []
         for dir_name in required_dirs:
             dir_path = os.path.join(self.seq_base, dir_name)
@@ -381,8 +358,8 @@ class IDD3DDataLoader(BaseDataLoader):
     def list_lidar_files(self):
         if not os.path.exists(self.lidar_dir):
             return []
-        return [os.path.join(self.lidar_dir, f) for f in sorted(os.listdir(self.lidar_dir)) 
-                if f.lower().endswith('.pcd')]
+        # Return frame_ids (e.g., '00000', '00200') instead of full paths
+        return sorted([os.path.splitext(f)[0] for f in os.listdir(self.lidar_dir) if f.lower().endswith('.pcd')])
     
     def read_annotations(self):
         if not os.path.exists(self.annot_json):
@@ -398,7 +375,7 @@ class IDD3DDataLoader(BaseDataLoader):
 class IDD3DLidarConverter(BaseConverter):
     """
     Convert IDD3D PCD files to nuScenes .pcd.bin files.
-    This now adds files to the common folder without deleting.
+    Reads annot_data.json to use the correct nuScenes-style filename.
     """
     
     def __init__(self):
@@ -413,51 +390,66 @@ class IDD3DLidarConverter(BaseConverter):
             use_o3d = False
             log_handler.log("Warning: open3d not available, creating placeholder files", 'warning')
         
-        files = [os.path.basename(p) for p in data_loader.list_lidar_files()]
-        dst_dir = data_loader.converted_lidar
-        src_dir = data_loader.lidar_dir
-        
-        if not files:
-            log_handler.log("No LiDAR files found", 'warning')
+        annot_data = data_loader.read_annotations()
+        if not annot_data:
+            log_handler.log("No annotations found, skipping LiDAR conversion.", 'warning')
             return
+            
+        frame_ids = sorted(annot_data.keys()) # e.g., "00000", "00200"
+        
+        dst_dir = data_loader.converted_lidar # .../samples/LIDAR
+        src_dir = data_loader.lidar_dir       # .../idd3d_seq10/lidar
         
         converted = 0
         placeholders = 0
         overwritten = 0
         
-        for i, fname in enumerate(files):
-            src = os.path.join(src_dir, fname)
-            base = os.path.splitext(fname)[0]
-            dst = os.path.join(dst_dir, base + '.pcd.bin')
+        for frame_id in frame_ids:
+            src_file = os.path.join(src_dir, f"{frame_id}.pcd")
+            if not os.path.exists(src_file):
+                log_handler.log(f"Source file not found: {src_file}", 'warning')
+                continue
+
+            if frame_id not in annot_data:
+                log_handler.log(f"Skipping frame {frame_id}: not found in annot_data.json", 'warning')
+                continue
+            frame_data = annot_data[frame_id]
             
-            if os.path.exists(dst):
+            dst_filename_base_pcd = os.path.basename(frame_data.get('lidar', f"{frame_id}.pcd"))
+            dst_filename_base = os.path.splitext(dst_filename_base_pcd)[0]
+            dst_filename = f"{dst_filename_base}.pcd.bin"
+            
+            dst_path = os.path.join(dst_dir, dst_filename)
+            
+            if os.path.exists(dst_path):
                 overwritten += 1
             
             try:
                 if use_o3d:
-                    pcd = o3d.io.read_point_cloud(src)
+                    pcd = o3d.io.read_point_cloud(src_file)
                     xyz = np.asarray(pcd.points, dtype=np.float32)
                     intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
                     pts = np.hstack((xyz, intensity))
-                    pts.astype(np.float32).tofile(dst)
+                    pts.astype(np.float32).tofile(dst_path)
                     converted += 1
                 else:
-                    open(dst, 'wb').close()
+                    open(dst_path, 'wb').close()
                     placeholders += 1
-            except Exception:
-                open(dst, 'wb').close()
+            except Exception as e:
+                log_handler.log(f"Error converting {src_file}: {e}", 'error')
+                open(dst_path, 'wb').close()
                 placeholders += 1
         
         log_handler.log(f"LiDAR conversion complete: {converted} converted, {placeholders} placeholders.", 'success')
         if overwritten > 0:
-            log_handler.log(f"Warning: {overwritten} existing LiDAR files were overwritten. Check for unique frame IDs.", 'warning')
+            log_handler.log(f"Warning: {overwritten} existing LiDAR files were overwritten.", 'warning')
         log_handler.log(f"  Output: {dst_dir}", 'info')
 
 
 class IDD3DCameraConverter(BaseConverter):
     """
     Convert IDD3D camera images from PNG to JPEG.
-    This now adds files to the common folder without deleting.
+    Reads annot_data.json to use the correct nuScenes-style filename.
     """
     
     def __init__(self):
@@ -472,59 +464,72 @@ class IDD3DCameraConverter(BaseConverter):
             loghandler.log("PIL/Pillow not available, skipping camera conversion", "warning")
             return
         
-        cameradir = os.path.join(dataloader.seq_base, "camera")
-        if not os.path.exists(cameradir):
+        annot_data = dataloader.read_annotations()
+        if not annot_data:
+            loghandler.log("No annotations found, skipping Camera conversion.", 'warning')
+            return
+            
+        frame_ids = sorted(annot_data.keys()) # e.g., "00000", "00200"
+        
+        src_camera_dir = os.path.join(dataloader.seq_base, "camera")
+        dst_samples_dir = dataloader.samples_dir
+        
+        if not os.path.exists(src_camera_dir):
             loghandler.log("No camera directory found", "warning")
             return
-        
-        camerachannels = ["cam0", "cam1", "cam2", "cam3", "cam4", "cam5"]
-        camdir = dataloader.cam_dir
         
         converted = 0
         errors = 0
         overwritten = 0
-        
-        for camid in camerachannels:
-            camfolder = os.path.join(cameradir, camid)
-            if not os.path.exists(camfolder):
-                loghandler.log(f"Camera folder not found: {camfolder}", "warning")
+
+        for frame_id in frame_ids:
+            if frame_id not in annot_data:
+                loghandler.log(f"Skipping frame {frame_id}: not found in annot_data.json", 'warning')
                 continue
+            frame_data = annot_data[frame_id]
             
-            output_camid = f"cam {camid[-1]}"
-            camsubdir = os.path.join(camdir, output_camid)
-            
-            pngfiles = sorted([f for f in os.listdir(camfolder) if f.lower().endswith('.png')])
-            loghandler.log(f"Processing {camid}: {len(pngfiles)} images -> {output_camid}", "info")
-            
-            for fname in pngfiles:
-                srcpath = os.path.join(camfolder, fname)
-                basename = os.path.splitext(fname)[0]
-                dstpath = os.path.join(camsubdir, basename + '.jpg')
+            for idd_cam, nu_cam in IDD3D_TO_NUSCENES_CAM_MAP.items(): # e.g., "cam0", "CAM_FRONT_LEFT"
                 
-                if os.path.exists(dstpath):
+                src_path = os.path.join(src_camera_dir, idd_cam, f"{frame_id}.png")
+                if not os.path.exists(src_path):
+                    loghandler.log(f"Source file not found: {src_path}", 'warning')
+                    continue
+                
+                dst_filename_png = frame_data.get(idd_cam)
+                if not dst_filename_png:
+                    loghandler.log(f"No filename for {idd_cam} in frame {frame_id}", 'warning')
+                    continue
+                
+                dst_filename_base = os.path.splitext(os.path.basename(dst_filename_png))[0]
+                dst_filename = f"{dst_filename_base}.jpg"
+
+                dst_path = os.path.join(dst_samples_dir, nu_cam, dst_filename)
+                
+                if os.path.exists(dst_path):
                     overwritten += 1
                 
                 try:
                     if usepil:
-                        img = Image.open(srcpath)
+                        img = Image.open(src_path)
                         if img.mode != 'RGB':
                             img = img.convert('RGB')
-                        img.save(dstpath, 'JPEG', quality=95)
+                        img.save(dst_path, 'JPEG', quality=95)
                         converted += 1
                 except Exception as e:
                     errors += 1
-                    loghandler.log(f"Error converting {fname}: {str(e)}", "error")
+                    loghandler.log(f"Error converting {src_path} to {dst_path}: {str(e)}", "error")
         
         loghandler.log(f"Camera conversion complete: {converted} images converted, {errors} errors", "success")
         if overwritten > 0:
-            loghandler.log(f"Warning: {overwritten} existing image files were overwritten. Check for unique frame IDs.", 'warning')
-        loghandler.log(f"  Output: {camdir}", 'info')
+            loghandler.log(f"Warning: {overwritten} existing image files were overwritten.", 'warning')
+        loghandler.log(f"  Output: {dst_samples_dir}", 'info')
 
 
 class IDD3DCalibConverter(BaseConverter):
     """
     Generate calibration stubs for IDD3D.
-    This now *overwrites* the calibration files, as they should be static.
+    Saves to 'anotations' folder.
+    Uses new channel names (e.g., 'CAM_FRONT') and persistent tokens.
     """
     
     def __init__(self, token_manager):
@@ -532,33 +537,32 @@ class IDD3DCalibConverter(BaseConverter):
         self.token_manager = token_manager
     
     def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
-        sensors = ['Lidar', 'cam0', 'cam1', 'cam2', 'cam3', 'cam4', 'cam5']
+        
+        sensors = [LIDAR_CHANNEL] + list(IDD3D_TO_NUSCENES_CAM_MAP.values())
+        
         calibrated_list = []
         sensors_j = []
         
         for s in sensors:
-            # Use persistent tokens
             sensor_token = self.token_manager.get_sensor_token(s)
             calib_token = self.token_manager.get_calibration_token(s)
             
             entry = {
                 "token": calib_token,
                 "sensor_token": sensor_token,
-                "translation": [0.0, 0.0, 1.8] if s.upper().startswith('LIDAR') else [0.0, 0.0, 1.6],
-                "rotation": [1.0, 0.0, 0.0, 0.0], # Identity quaternion
+                "translation": [0.0, 0.0, 1.8] if s == LIDAR_CHANNEL else [0.0, 0.0, 1.6],
+                "rotation": [1.0, 0.0, 0.0, 0.0],
                 "camera_intrinsic": []
             }
             calibrated_list.append(entry)
             sensors_j.append({
                 "token": sensor_token,
-                "modality": "lidar" if s.upper().startswith('LIDAR') else "camera",
+                "modality": "lidar" if s == LIDAR_CHANNEL else "camera",
                 "channel": s,
             })
         
-        out_calib_dir = os.path.join(data_loader.out_data, 'calibration')
-        
-        calib_path = os.path.join(out_calib_dir, 'calibrated_sensor.json')
-        sensor_path = os.path.join(out_calib_dir, 'sensor.json') # nuScenes standard name
+        calib_path = os.path.join(data_loader.annot_out, 'calibrated_sensor.json')
+        sensor_path = os.path.join(data_loader.annot_out, 'sensor.json')
 
         with open(calib_path, 'w') as f:
             json.dump(calibrated_list, f, indent=2)
@@ -566,10 +570,9 @@ class IDD3DCalibConverter(BaseConverter):
             json.dump(sensors_j, f, indent=2)
         
         log_handler.log("Calibration stubs created/overwritten", 'success')
-        log_handler.log(f"  Output: {out_calib_dir}", 'info')
+        log_handler.log(f"  Output: {data_loader.annot_out}", 'info')
 
 
-# --- NEW STUB CONVERTER ---
 class IDD3DLogConverter(BaseConverter):
     """
     Generates and merges a log.json entry for this sequence.
@@ -582,9 +585,7 @@ class IDD3DLogConverter(BaseConverter):
     def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
         out_path = os.path.join(data_loader.annot_out, 'log.json')
         
-        # Use sequence name to create a unique logfile entry
         logfile = f"{data_loader.sequence}-{datetime.now().strftime('%Y-%m-%d')}"
-        # Use a persistent token based on the logfile name
         log_token = self.token_manager.get_category_token(f"log_{logfile}")
         
         new_log_entry = {
@@ -606,7 +607,6 @@ class IDD3DLogConverter(BaseConverter):
                     log_handler.log(f"Could not read existing log.json: {e}", 'warning')
                     logs = []
             
-            # Check if this logfile already exists and update it
             found = False
             for i, log in enumerate(logs):
                 if log.get('logfile') == logfile:
@@ -627,7 +627,6 @@ class IDD3DLogConverter(BaseConverter):
                 log_handler.log(f"FATAL: Could not write to log.json: {e}", 'error')
                 raise
 
-# --- NEW STUB CONVERTER ---
 class IDD3DEgoPoseConverter(BaseConverter):
     """
     Generates stubbed ego_pose.json entries for this sequence.
@@ -646,11 +645,10 @@ class IDD3DEgoPoseConverter(BaseConverter):
         new_poses = []
         
         for i, frame_id in enumerate(frame_ids):
-            # Get persistent timestamp for this frame
             timestamp = self.token_manager.get_timestamp(i)
             
             new_poses.append({
-                "token": uuid.uuid4().hex, # Egos pose tokens are always unique
+                "token": uuid.uuid4().hex,
                 "timestamp": timestamp,
                 "translation": [0.0, 0.0, 0.0], # Stubbed
                 "rotation": [1.0, 0.0, 0.0, 0.0]  # Stubbed (identity quaternion)
@@ -659,11 +657,10 @@ class IDD3DEgoPoseConverter(BaseConverter):
         out_path = os.path.join(data_loader.annot_out, 'ego_pose.json')
         append_to_json_list(out_path, new_poses, log_handler)
 
-
-# --- NEW STUB CONVERTER ---
 class IDD3DMapConverter(BaseConverter):
     """
     Generates and merges a single stubbed map.json entry for the location.
+    Now links to all known logs for that location.
     """
     def __init__(self, token_manager):
         super().__init__('map')
@@ -671,22 +668,31 @@ class IDD3DMapConverter(BaseConverter):
         
     def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
         out_path = os.path.join(data_loader.annot_out, 'map.json')
+        log_path = os.path.join(data_loader.annot_out, 'log.json')
         
-        # We'll create one map record for "Hyderabad" and re-use it.
         location = "Hyderabad"
         map_token = self.token_manager.get_category_token(f"map_{location}")
         
-        new_map_entry = {
-            "token": map_token,
-            "log_tokens": [], # We can't populate this reliably
-            "category": "semantic_prior",
-            "filename": f"maps/{location}.png", # Stubbed filename
-            "node_tokens": [],
-            "segment_tokens": [],
-            "patch_tokens": []
-        }
-        
         with json_file_lock:
+            all_log_tokens_for_location = []
+            if os.path.exists(log_path):
+                try:
+                    with open(log_path, 'r') as f:
+                        all_logs = json.load(f)
+                        if isinstance(all_logs, list):
+                            for log in all_logs:
+                                if log.get('location') == location and log.get('token'):
+                                    all_log_tokens_for_location.append(log.get('token'))
+                except Exception as e:
+                    log_handler.log(f"Could not read log.json to link maps: {e}", 'warning')
+            
+            new_map_entry = {
+                "token": map_token,
+                "log_tokens": all_log_tokens_for_location,
+                "category": "semantic_prior",
+                "filename": f"maps/{location.lower()}.png",
+            }
+            
             maps = []
             if os.path.exists(out_path):
                 try:
@@ -697,27 +703,26 @@ class IDD3DMapConverter(BaseConverter):
                     log_handler.log(f"Could not read existing map.json: {e}", 'warning')
                     maps = []
             
-            # Check if this map already exists
             found = False
             for i, map_entry in enumerate(maps):
                 if map_entry.get('token') == map_token:
+                    maps[i] = new_map_entry
                     found = True
+                    log_handler.log(f"Updating existing map entry for {location}", 'info')
                     break
             
             if not found:
                 maps.append(new_map_entry)
                 log_handler.log(f"Adding new map entry for {location}", 'info')
-            else:
-                log_handler.log(f"Map entry for {location} already exists", 'info')
 
             try:
                 with open(out_path, 'w') as f:
                     json.dump(maps, f, indent=2)
                 log_handler.log(f"Unified map.json updated. Total maps: {len(maps)}", 'success')
+                log_handler.log(f"  Map '{location}' now linked to {len(all_log_tokens_for_location)} logs.", 'info')
             except Exception as e:
                 log_handler.log(f"FATAL: Could not write to map.json: {e}", 'error')
                 raise
-
 
 class IDD3DSceneConverter(BaseConverter):
     """
@@ -729,7 +734,7 @@ class IDD3DSceneConverter(BaseConverter):
         self.token_manager = token_manager
         self.sequence_name = sequence_name
     
-    def run(self, data_loader: IDD3DDataLoader, log_handler):
+    def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
         annot_data = data_loader.read_annotations()
         if not annot_data:
             log_handler.log("No annotations found", 'warning')
@@ -741,19 +746,20 @@ class IDD3DSceneConverter(BaseConverter):
             return
         
         scene_token = self.token_manager.get_scene_token()
-        log_token = self.token_manager.get_category_token(f"log_{data_loader.sequence}-{datetime.now().strftime('%Y-%m-%d')}")
+        logfile = f"{data_loader.sequence}-{datetime.now().strftime('%Y-%m-%d')}"
+        log_token = self.token_manager.get_category_token(f"log_{logfile}")
         
         first_sample_token = self.token_manager.get_frame_token(frame_ids[0])
         last_sample_token = self.token_manager.get_frame_token(frame_ids[-1])
         
-        seq_num_str = self.sequence_name.split('_')[-1].replace('seq', '') # '10'
-        formatted_num = seq_num_str.zfill(3) # '010'
-        new_scene_name = f"scene-{formatted_num}" # 'scene-010'
+        seq_num_str = self.sequence_name.split('_')[-1].replace('seq', '')
+        formatted_num = seq_num_str.zfill(3)
+        new_scene_name = f"scene-{formatted_num}"
 
         current_scene = {
             "token": scene_token,
-            "log_token": log_token, # Link to the log we just stubbed
-            "nbr_samples": len(frame_ids), # We can calculate this
+            "log_token": log_token, 
+            "nbr_samples": len(frame_ids),
             "first_sample_token": first_sample_token,
             "last_sample_token": last_sample_token,
             "name": new_scene_name, 
@@ -795,10 +801,12 @@ class IDD3DSceneConverter(BaseConverter):
         log_handler.log(f"Unified scene.json updated ({len(scenes)} total scenes)", 'success')
         log_handler.log(f"  Output: {out_path}", 'info')
 
-
 class IDD3DSampleDataConverter(BaseConverter):
     """
     Generate sample_data.json. Appends to existing file.
+    Reads filenames from annot_data.json
+    Uses correct 1440x1080 resolution.
+    Correctly links ALL prev/next tokens on every run.
     """
     
     def __init__(self, token_manager, sequence_name='seq'):
@@ -806,7 +814,7 @@ class IDD3DSampleDataConverter(BaseConverter):
         self.token_manager = token_manager
         self.sequence_name = sequence_name
     
-    def run(self, data_loader, log_handler):
+    def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
         annot_data = data_loader.read_annotations()
         if not annot_data:
             log_handler.log("No annotations found", 'warning')
@@ -817,38 +825,89 @@ class IDD3DSampleDataConverter(BaseConverter):
             log_handler.log("No frames found", 'warning')
             return
         
-        sample_data_list = []
-        camera_channels = ["cam0", "cam1", "cam2", "cam3", "cam4", "cam5"]
+        new_sample_data_list = []
         
         for i, frame_id in enumerate(frame_ids):
+            if frame_id not in annot_data:
+                log_handler.log(f"Skipping frame {frame_id}: not found in annot_data.json", 'warning')
+                continue
             frame_data = annot_data[frame_id]
             sample_token = self.token_manager.get_frame_token(frame_id)
             timestamp = self.token_manager.get_timestamp(i)
             
-            lidar_filename = frame_data.get('lidar', f'{frame_id}.pcd.bin')
-            sample_data_list.append({
+            # --- LiDAR Data ---
+            lidar_filename_raw = frame_data.get('lidar', f'{frame_id}.pcd.bin')
+            lidar_filename_base = os.path.splitext(os.path.basename(lidar_filename_raw))[0]
+            lidar_filename = f"{lidar_filename_base}.pcd.bin"
+            
+            new_sample_data_list.append({
                 "token": uuid.uuid4().hex, 
                 "sample_token": sample_token,
-                "calibrated_sensor_token": self.token_manager.get_calibration_token("Lidar"),
-                "filename": f"data/lidar/{lidar_filename}",
+                "calibrated_sensor_token": self.token_manager.get_calibration_token(LIDAR_CHANNEL),
+                "filename": f"samples/{LIDAR_CHANNEL}/{lidar_filename}", 
                 "fileformat": "pcd.bin", "width": 0, "height": 0, "timestamp": timestamp,
                 "is_key_frame": True, "next": "", "prev": ""
             })
             
-            for cam_idx, cam_channel in enumerate(camera_channels):
-                cam_filename = frame_data.get(f'cam{cam_idx}', f'{frame_id}.jpg')
-                sample_data_list.append({
+            # --- Camera Data ---
+            for idd_cam, nu_cam in IDD3D_TO_NUSCENES_CAM_MAP.items(): 
+                
+                cam_filename_raw = frame_data.get(idd_cam, f'{frame_id}.jpg')
+                cam_filename = os.path.basename(cam_filename_raw)
+                
+                new_sample_data_list.append({
                     "token": uuid.uuid4().hex,
                     "sample_token": sample_token,
-                    "calibrated_sensor_token": self.token_manager.get_calibration_token(cam_channel),
-                    "filename": f"data/cam/cam {cam_idx}/{cam_filename}",
-                    "fileformat": "jpg", "width": 1920, "height": 1080, "timestamp": timestamp,
+                    "calibrated_sensor_token": self.token_manager.get_calibration_token(nu_cam),
+                    "filename": f"samples/{nu_cam}/{cam_filename}", 
+                    "fileformat": "jpg", 
+                    "width": 1440,
+                    "height": 1080, 
+                    "timestamp": timestamp,
                     "is_key_frame": True, "next": "", "prev": ""
                 })
         
+        # --- PREV/NEXT LINKING LOGIC ---
         out_path = os.path.join(data_loader.annot_out, 'sample_data.json')
-        append_to_json_list(out_path, sample_data_list, log_handler)
+        
+        with json_file_lock:
+            existing_data = []
+            if os.path.exists(out_path):
+                try:
+                    with open(out_path, 'r') as f:
+                        existing_data = json.load(f)
+                        if not isinstance(existing_data, list): existing_data = []
+                except Exception as e:
+                    log_handler.log(f"Warning: could not read existing sample_data.json: {e}", "warning")
+                    existing_data = []
 
+            all_data = existing_data + new_sample_data_list
+            
+            sensor_groups = {}
+            for sd in all_data:
+                token = sd['calibrated_sensor_token']
+                if token not in sensor_groups: sensor_groups[token] = []
+                sensor_groups[token].append(sd)
+
+            log_handler.log(f"Linking prev/next tokens for {len(all_data)} total sample_data entries...", 'info')
+            
+            final_linked_list = []
+            
+            for sensor_token, sd_list in sensor_groups.items():
+                sorted_list = sorted(sd_list, key=lambda x: x['timestamp'])
+                for i, sd in enumerate(sorted_list):
+                    sd['prev'] = sorted_list[i-1]['token'] if i > 0 else ""
+                    sd['next'] = sorted_list[i+1]['token'] if i < len(sorted_list) - 1 else ""
+                
+                final_linked_list.extend(sorted_list)
+            
+            try:
+                with open(out_path, 'w') as f:
+                    json.dump(final_linked_list, f, indent=2)
+                log_handler.log(f"Appended {len(new_sample_data_list)} items to sample_data.json. Total items: {len(final_linked_list)}", 'success')
+            except Exception as e:
+                log_handler.log(f"FATAL: Could not write to {out_path}: {e}", 'error')
+                raise
 
 class IDD3DCategoryConverter(BaseConverter):
     """
@@ -911,7 +970,6 @@ class IDD3DCategoryConverter(BaseConverter):
                 log_handler.log(f"FATAL: Could not write to category.json: {e}", 'error')
                 raise
 
-
 class IDD3DSampleConverter(BaseConverter):
     """
     Generate sample.json. Appends to existing file.
@@ -953,7 +1011,6 @@ class IDD3DSampleConverter(BaseConverter):
         
         out_path = os.path.join(data_loader.annot_out, 'sample.json')
         append_to_json_list(out_path, samples, log_handler)
-
 
 class IDD3DSampleAnnotationConverter(BaseConverter):
     """
@@ -1035,7 +1092,6 @@ class IDD3DSampleAnnotationConverter(BaseConverter):
         out_path = os.path.join(data_loader.annot_out, 'sample_annotation.json')
         append_to_json_list(out_path, sample_annotations, log_handler)
 
-
 class IDD3DInstanceConverter(BaseConverter):
     """
     Generate instance.json. Appends to existing file.
@@ -1062,7 +1118,7 @@ class IDD3DInstanceConverter(BaseConverter):
             return
         
         frame_ids = sorted(annot_data.keys())
-        instance_tracker = {} # Tracks instances *only* for this run
+        instance_tracker = {} 
         
         for frame_id in frame_ids:
             label_path = os.path.join(data_loader.label_dir, f"{frame_id}.json")
@@ -1102,17 +1158,101 @@ class IDD3DInstanceConverter(BaseConverter):
             new_instances.append({
                 "token": data['instance_token'],
                 "category_token": data['category_token'],
-                "nbr_annotations": None, # Cannot calculate this in append mode
+                "nbr_annotations": None, 
                 "first_annotation_token": data['first_ann_token'],
                 "last_annotation_token": data['last_ann_token']
             })
         
         out_path = os.path.join(data_loader.annot_out, 'instance.json')
-        # This will append new instances. We rely on the TokenManager
-        # to ensure that if we re-run seq10, we get the *same* instance_tokens
-        # and don't create duplicates.
-        # TODO: Add logic to *update* existing instances if found.
-        append_to_json_list(out_path, new_instances, log_handler)
+        
+        with json_file_lock:
+            existing_instances = {}
+            if os.path.exists(out_path):
+                try:
+                    with open(out_path, 'r') as f:
+                        insts = json.load(f)
+                        existing_instances = {inst['token']: inst for inst in insts}
+                except Exception as e:
+                    log_handler.log(f"Could not read existing instance.json: {e}", 'warning')
+
+            updated_count = 0
+            new_count = 0
+            for inst in new_instances:
+                if inst['token'] in existing_instances:
+                    existing_instances[inst['token']]['last_annotation_token'] = inst['last_annotation_token']
+                    updated_count += 1
+                else:
+                    existing_instances[inst['token']] = inst
+                    new_count += 1
+            
+            final_instances = list(existing_instances.values())
+            try:
+                with open(out_path, 'w') as f:
+                    json.dump(final_instances, f, indent=2)
+                log_handler.log(f"Instance file merged. Added {new_count}, updated {updated_count}. Total: {len(final_instances)}", 'success')
+            except Exception as e:
+                log_handler.log(f"FATAL: Could not write to instance.json: {e}", 'error')
+                raise
+
+# --- NEW FILE MANIFEST CONVERTER ---
+class IDD3DFileManifestConverter(BaseConverter):
+    """
+    Generates a human-readable manifest linking source files to output files.
+    Appends to the existing file_manifest.json.
+    """
+    def __init__(self, token_manager, sequence_name):
+        super().__init__('manifest')
+        self.token_manager = token_manager
+        self.sequence_name = sequence_name
+    
+    def run(self, data_loader: IDD3DDataLoader, log_handler: LogHandler):
+        annot_data = data_loader.read_annotations()
+        if not annot_data:
+            log_handler.log("No annotations found, skipping manifest", 'warning')
+            return
+            
+        frame_ids = sorted(annot_data.keys())
+        new_manifest_entries = []
+
+        for i, frame_id in enumerate(frame_ids):
+            if frame_id not in annot_data:
+                continue
+            frame_data = annot_data[frame_id]
+            
+            manifest_entry = {
+                "frame_id": frame_id,
+                "sequence": self.sequence_name,
+                "sample_token": self.token_manager.get_frame_token(frame_id),
+                "sensors": []
+            }
+
+            # --- LiDAR Entry ---
+            src_lidar_name = f"{frame_id}.pcd"
+            dst_lidar_raw = frame_data.get('lidar', f"{frame_id}.pcd.bin")
+            dst_lidar_name = f"{os.path.splitext(os.path.basename(dst_lidar_raw))[0]}.pcd.bin"
+            
+            manifest_entry["sensors"].append({
+                "channel": LIDAR_CHANNEL,
+                "source_file": f"lidar/{src_lidar_name}",
+                "output_file": f"samples/{LIDAR_CHANNEL}/{dst_lidar_name}"
+            })
+            
+            # --- Camera Entries ---
+            for idd_cam, nu_cam in IDD3D_TO_NUSCENES_CAM_MAP.items():
+                src_cam_name = f"{frame_id}.png"
+                dst_cam_raw = frame_data.get(idd_cam, f"{frame_id}.jpg")
+                dst_cam_name = os.path.basename(dst_cam_raw)
+                
+                manifest_entry["sensors"].append({
+                    "channel": nu_cam,
+                    "source_file": f"camera/{idd_cam}/{src_cam_name}",
+                    "output_file": f"samples/{nu_cam}/{dst_cam_name}"
+                })
+            
+            new_manifest_entries.append(manifest_entry)
+        
+        out_path = os.path.join(data_loader.annot_out, 'file_manifest.json')
+        append_to_json_list(out_path, new_manifest_entries, log_handler)
 
 
 class IDD3DTokenRegistrySaver(BaseConverter):
@@ -1142,13 +1282,11 @@ class ConverterRegistry:
     
     @classmethod
     def register(cls, source: str, target: str, pipeline_builder):
-        """Register a conversion pipeline"""
         key = (source, target)
         cls._conversions[key] = pipeline_builder
     
     @classmethod
     def get_pipeline(cls, source: str, target: str, config: dict):
-        """Get a pipeline for source->target conversion"""
         key = (source, target)
         if key not in cls._conversions:
             raise ValueError(f"No conversion registered for {source} -> {target}")
@@ -1157,7 +1295,6 @@ class ConverterRegistry:
     
     @classmethod
     def get_available_conversions(cls):
-        """Get all available conversions"""
         return [{'source': s, 'target': t} for s, t in cls._conversions.keys()]
 
 
@@ -1177,7 +1314,6 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
     registry_path = os.path.join(root_path, 'nuScenesFormat', 'anotations', 'token_registry.json')
     
     # --- Calculate new base_timestamp ---
-    # Find the last timestamp from sample.json to ensure no overlap
     last_timestamp = 1640995200000000 # Default start
     sample_json_path = os.path.join(root_path, 'nuScenesFormat', 'anotations', 'sample.json')
     
@@ -1189,12 +1325,10 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
                     if samples and isinstance(samples, list):
                         last_timestamp = samples[-1].get('timestamp', last_timestamp)
             except Exception:
-                pass # Use default timestamp
+                pass 
                 
-    # Add a 20-second gap (in microseconds)
-    new_base_timestamp = last_timestamp + 20_000_000 
+    new_base_timestamp = last_timestamp + 20_000_000 # 20-second gap
     
-    # Create persistent token manager
     token_manager = TokenTimestampManager(
         frame_rate_hz=10, 
         registry_path=registry_path,
@@ -1214,6 +1348,7 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
     # PHASE 2: Taxonomy & Stubs (Merges)
     if conversions.get('category', False):
         pipeline.add_converter(IDD3DCategoryConverter(token_manager))
+    
     if conversions.get('log', False):
         pipeline.add_converter(IDD3DLogConverter(token_manager, sequence_name))
     if conversions.get('map', False):
@@ -1234,6 +1369,12 @@ def build_idd3d_to_nuscenes_pipeline(config: dict) -> DatasetConversionPipeline:
         pipeline.add_converter(IDD3DInstanceConverter(token_manager))
     if conversions.get('sample_annotation', False):
         pipeline.add_converter(IDD3DSampleAnnotationConverter(token_manager, sequence_name))
+    
+    # --- ADD MANIFEST (unconditional) ---
+    # This will now run if the 'manifest' checkbox is checked (which it is by default).
+    # If you want it to *always* run, remove the if check.
+    if conversions.get('manifest', True): # Set to True to run by default
+        pipeline.add_converter(IDD3DFileManifestConverter(token_manager, sequence_name))
 
     # PHASE 5: Save Token Registry (runs last)
     pipeline.add_converter(IDD3DTokenRegistrySaver(token_manager, registry_path))
@@ -1263,7 +1404,6 @@ def validate_paths():
     """Validate dataset paths"""
     data = request.json
     source = data.get('source', 'idd3d')
-    
     sequence_path = data.get('sequence_path')
     
     if not sequence_path:
@@ -1291,7 +1431,6 @@ def convert_stream():
     data = request.json
     source = data.get('source', 'idd3d')
     target = data.get('target', 'nuscenes')
-    
     sequence_path = data.get('sequence_path')
     conversions = data.get('conversions', {})
     

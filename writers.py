@@ -423,9 +423,14 @@ class NuScenesWriter(BaseWriter):
 
     def _write_map(self):
         """
-        Writes a static map.json file.
-        The user is responsible for adding the .png file to the maps folder.
-        """
+Signature:
+_write_map(self)
+Docstring:
+Writes a static map.json file.
+The user is responsible for adding the .png file to the maps folder.
+File:      ~/Desktop/IntermediateFormat/writers.py
+Type:      function
+"""
         location = "Hyderabad"
         map_filename = f"maps/{location.lower()}.png"
         map_token = self.token_manager.get_category_token(f"map_{location}")

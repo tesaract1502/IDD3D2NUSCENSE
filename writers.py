@@ -261,8 +261,7 @@ class NuScenesWriter(BaseWriter):
         for category in official_categories:
             cat_name = category['name']
             cat_token = category['token']
-            # We only add if it's not already in the manager
-            # (e.g. from token_registry.json)
+            # This check is crucial: only add if NOT in registry
             if cat_name not in self.token_manager.category_tokens:
                 self.token_manager.category_tokens[cat_name] = cat_token
                 count += 1
@@ -440,7 +439,8 @@ class NuScenesWriter(BaseWriter):
         # Get all unique category names from the current instances
         all_category_names_from_data = {inst.category_name for inst in instances}
         
-        # Add all pre-populated categories
+        # Add all pre-populated categories from the manager
+        # (This now ONLY contains real categories)
         for name, token in self.token_manager.category_tokens.items():
             new_categories.append({
                 "token": token,
@@ -449,6 +449,7 @@ class NuScenesWriter(BaseWriter):
             })
         
         # Add any *new* categories from the data that weren't pre-populated
+        # (This will be empty for IDD3D, but useful for Argoverse)
         for name in all_category_names_from_data:
             if name not in self.token_manager.category_tokens:
                 token = self.token_manager.get_category_token(name) # This will create a new one
@@ -490,6 +491,7 @@ class NuScenesWriter(BaseWriter):
         inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
 
         for temp_inst_id, new_anns_list in new_anns_by_inst_id.items():
+            # This call is now safe: it gets the official token
             inst_token = self.token_manager.get_instance_token(temp_inst_id)
             
             # Sort new annotations
@@ -506,9 +508,11 @@ class NuScenesWriter(BaseWriter):
                 category_name = inst_name_map.get(temp_inst_id, "")
                 attribute_tokens = []
                 if category_name.startswith('vehicle.'):
-                    attribute_tokens = [self.token_manager.get_category_token("vehicle.moving")]
+                    # --- FIXED: Use get_attribute_token ---
+                    attribute_tokens = [self.token_manager.get_attribute_token("vehicle.moving")]
                 elif category_name.startswith('human.'):
-                    attribute_tokens = [self.token_manager.get_category_token("pedestrian.moving")]
+                     # --- FIXED: Use get_attribute_token ---
+                    attribute_tokens = [self.token_manager.get_attribute_token("pedestrian.moving")]
 
                 ann_token = generated_tokens[i]
                 prev_token = generated_tokens[i-1] if i > 0 else last_ann_token_from_existing
@@ -519,7 +523,8 @@ class NuScenesWriter(BaseWriter):
                     "sample_token": self.token_manager.get_frame_token(if_ann.temp_frame_id),
                     "instance_token": inst_token,
                     "attribute_tokens": attribute_tokens,
-                    "visibility_token": self.token_manager.get_category_token("v4-0"),
+                    # --- FIXED: Use get_visibility_token ---
+                    "visibility_token": self.token_manager.get_visibility_token("v4-0"),
                     "translation": if_ann.translation,
                     "size": if_ann.size,
                     "rotation": if_ann.rotation,
@@ -531,6 +536,7 @@ class NuScenesWriter(BaseWriter):
             if inst_token not in inst_db:
                 inst_db[inst_token] = {
                     "token": inst_token,
+                    # --- FIXED: Use get_category_token (which is now safe) ---
                     "category_token": self.token_manager.get_category_token(inst_name_map.get(temp_inst_id, "")),
                     "nbr_annotations": len(generated_tokens),
                     "first_annotation_token": generated_tokens[0],
@@ -558,7 +564,8 @@ class NuScenesWriter(BaseWriter):
         new_entries = []
         for vis in vis_levels:
             new_entries.append({
-                "token": self.token_manager.get_category_token(vis["level"]),
+                 # --- FIXED: Use get_visibility_token ---
+                "token": self.token_manager.get_visibility_token(vis["level"]),
                 "level": vis["level"],
                 "description": vis["description"]
             })
@@ -577,7 +584,8 @@ class NuScenesWriter(BaseWriter):
         new_entries = []
         for attr in attributes:
             new_entries.append({
-                "token": self.token_manager.get_category_token(attr["name"]),
+                 # --- FIXED: Use get_attribute_token ---
+                "token": self.token_manager.get_attribute_token(attr["name"]),
                 "name": attr["name"],
                 "description": attr["description"]
             })
@@ -591,12 +599,13 @@ class NuScenesWriter(BaseWriter):
     def _write_map(self):
         location = "Hyderabad"
         map_filename = f"maps/{location.lower()}.png"
-        map_token = self.token_manager.get_category_token(f"map_{location}")
+         # --- FIXED: Use get_map_token ---
+        map_token = self.token_manager.get_map_token(f"map_{location}")
         
         # Link all logs generated so far
         new_map_entry = {
             "token": map_token,
-            "log_tokens": self.generated_log_tokens, # <-- FIXED
+            "log_tokens": self.generated_log_tokens, # This is now correct
             "category": "semantic_prior",
             "filename": map_filename,
         }
@@ -614,10 +623,11 @@ class NuScenesWriter(BaseWriter):
         new_entries = []
         for if_scene in scenes:
             logfile = f"{if_scene.name}-{datetime.now().strftime('%Y-%m-%d')}"
-            log_token = self.token_manager.get_category_token(f"log_{logfile}") 
+             # --- FIXED: Use get_log_token ---
+            log_token = self.token_manager.get_log_token(f"log_{logfile}") 
             
             # Add to list for map.json
-            self.generated_log_tokens.append(log_token) # <-- FIXED
+            self.generated_log_tokens.append(log_token)
             
             new_entries.append({
                 "token": log_token,
@@ -627,7 +637,6 @@ class NuScenesWriter(BaseWriter):
                 "location": "Hyderabad"
             })
         
-        # Logs can be appended, but merging is safer
         merge_and_overwrite_json_list(
             os.path.join(self.annot_out_dir, 'log.json'),
             new_entries,

@@ -19,7 +19,7 @@ class BaseReader(ABC):
     """
     Abstract base class for all dataset readers.
     """
-    @abstractmethod
+    @abstractabstractmethod
     def read(self, sequence_path: str) -> IntermediateData:
         """
         Reads a dataset sequence from 'sequence_path' and returns
@@ -37,17 +37,29 @@ class Idd3dReader(BaseReader):
     """
     
     def __init__(self):
-        # This mapping logic is moved from the old converter classes
+        # --- THIS MAPPING IS NOW UPDATED ---
+        # It maps IDD3D categories to the valid names from category2.json
         self.idd3d_to_nuscenes_categories = {
-            'Car': 'vehicle.car', 'Truck': 'vehicle.truck', 'Bus': 'vehicle.bus',
-            'Motorcycle': 'vehicle.motorcycle', 'MotorcyleRider': 'vehicle.motorcycle',
-            'Bicycle': 'vehicle.bicycle', 'Auto': 'vehicle.auto',
-            'Person': 'human.pedestrian.adult', 'Rider': 'human.pedestrian.rider',
-            'Animal': 'animal', 
-            'TrafficLight': 'static_object.traffic_light',
-            'TrafficSign': 'static_object.traffic_sign', 
-            'Pole': 'static_object.pole',
-            'OtherVehicle': 'vehicle.other', 'Misc': 'movable_object.debris'
+            # Valid mappings from category2.json
+            'Car': 'vehicle.car',
+            'Truck': 'vehicle.truck',
+            'Bus': 'vehicle.bus',
+            'Motorcycle': 'vehicle.motorcycle',
+            'Bicycle': 'vehicle.bicycle',
+            'Person': 'movable_object.pedestrian', # Was human.pedestrian.adult
+            
+            # Guesses for other valid mappings
+            'Auto': 'movable_object.van', # Map Auto-rickshaw to 'van'
+            'Rider': 'movable_object.bicyclerider', # Map generic 'Rider'
+            'MotorcyleRider': 'vehicle.motorcycle', # Rider *on* a motorcycle
+            
+            # Mappings to UNKNOWN (since they aren't in category2.json)
+            'Animal': 'movable_object.unknown',
+            'TrafficLight': 'movable_object.unknown', # Was static_object.traffic_light
+            'TrafficSign': 'movable_object.unknown', # Was static_object.traffic_sign
+            'Pole': 'movable_object.unknown', # Was static_object.pole
+            'OtherVehicle': 'movable_object.unknown', # Was vehicle.other
+            'Misc': 'movable_object.unknown' # Was movable_object.debris
         }
         
         # This mapping is moved from the old IDD3DDataLoader
@@ -193,8 +205,9 @@ class Idd3dReader(BaseReader):
                         
                     # --- Populate Instance (from IDD3DInstanceConverter) ---
                     if obj_id not in instance_tracker:
+                        # Use the new, corrected mapping
                         category_name = self.idd3d_to_nuscenes_categories.get(
-                            obj_type, 'movable_object.debris' # Default
+                            obj_type, 'movable_object.unknown' # Default to unknown
                         )
                         data.instances.append(IFInstance(
                             temp_instance_id=obj_id,
@@ -212,10 +225,7 @@ class Idd3dReader(BaseReader):
                     size = [scl.get("x",1), scl.get("y",1), scl.get("z",1)]
                     
                     # Convert Euler (x,y,z) to Quaternion (w,x,y,z)
-                    # IDD3D rotation is [x,y,z] in radians, but nuScenes needs [w,x,y,z]
-                    # We will STUB this with an identity quaternion for now
-                    # A real conversion would require a math library (e.g., scipy)
-                    rotation_quat = [1.0, 0.0, 0.0, 0.0]
+                    rotation_quat = [1.0, 0.0, 0.0, 0.0] # Stubbed
                     
                     # Stub attributes
                     attributes = []
@@ -223,7 +233,7 @@ class Idd3dReader(BaseReader):
                     data.annotations.append(IFAnnotation(
                         temp_instance_id=obj_id,
                         temp_frame_id=frame_id,
-                        timestamp_us=timestamp,  # <-- MODIFIED: Added timestamp
+                        timestamp_us=timestamp,
                         translation=translation,
                         size=size,
                         rotation=rotation_quat,

@@ -261,8 +261,7 @@ class NuScenesWriter(BaseWriter):
         for category in official_categories:
             cat_name = category['name']
             cat_token = category['token']
-            # We only add if it's not already in the manager
-            # (e.g. from token_registry.json)
+            # This check is crucial: only add if NOT in registry
             # --- FIXED: Only add to category_tokens ---
             if cat_name not in self.token_manager.category_tokens:
                 self.token_manager.category_tokens[cat_name] = cat_token
@@ -562,8 +561,8 @@ class NuScenesWriter(BaseWriter):
             if cat_token not in used_category_tokens:
                 # This category was in category.json but not in instance.json
                 # We must create a dummy instance for it.
-                # We use the cat_token as the instance_token for a stable, unique ID
-                dummy_instance_token = f"dummy_instance_for_{cat_token}"
+                # --- FIXED: Use a clean, deterministic, random-looking token ---
+                dummy_instance_token = self.token_manager.get_instance_token(f"dummy_instance_for_{cat_name}")
                 
                 if dummy_instance_token not in inst_db: # Only add if it doesn't exist
                     inst_db[dummy_instance_token] = {

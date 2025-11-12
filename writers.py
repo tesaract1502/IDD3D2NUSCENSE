@@ -261,7 +261,9 @@ class NuScenesWriter(BaseWriter):
         for category in official_categories:
             cat_name = category['name']
             cat_token = category['token']
-            # This check is crucial: only add if NOT in registry
+            # We only add if it's not already in the manager
+            # (e.g. from token_registry.json)
+            # --- FIXED: Only add to category_tokens ---
             if cat_name not in self.token_manager.category_tokens:
                 self.token_manager.category_tokens[cat_name] = cat_token
                 count += 1
@@ -489,6 +491,9 @@ class NuScenesWriter(BaseWriter):
             new_anns_by_inst_id[ann.temp_instance_id].append(ann)
 
         inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
+        
+        # --- NEW: Keep track of which categories we've actually used ---
+        used_category_tokens = set()
 
         for temp_inst_id, new_anns_list in new_anns_by_inst_id.items():
             # This call is now safe: it gets the official token
@@ -533,11 +538,14 @@ class NuScenesWriter(BaseWriter):
                 })
 
             # --- Create / Update Instance DB Entry ---
+            # --- FIXED: Get the real category token and add to used set ---
+            category_token = self.token_manager.get_category_token(inst_name_map.get(temp_inst_id, ""))
+            used_category_tokens.add(category_token)
+
             if inst_token not in inst_db:
                 inst_db[inst_token] = {
                     "token": inst_token,
-                    # --- FIXED: Use get_category_token (which is now safe) ---
-                    "category_token": self.token_manager.get_category_token(inst_name_map.get(temp_inst_id, "")),
+                    "category_token": category_token,
                     "nbr_annotations": len(generated_tokens),
                     "first_annotation_token": generated_tokens[0],
                     "last_annotation_token": generated_tokens[-1]
@@ -546,6 +554,30 @@ class NuScenesWriter(BaseWriter):
                 inst_db[inst_token]["nbr_annotations"] += len(generated_tokens)
                 inst_db[inst_token]["last_annotation_token"] = generated_tokens[-1]
         
+        # --- NEW: Create dummy instances for unused categories ---
+        log.info("Checking for unused categories to create dummy instances...")
+        dummy_instance_count = 0
+        # Iterate through all *official* categories in the manager
+        for cat_name, cat_token in self.token_manager.category_tokens.items():
+            if cat_token not in used_category_tokens:
+                # This category was in category.json but not in instance.json
+                # We must create a dummy instance for it.
+                # We use the cat_token as the instance_token for a stable, unique ID
+                dummy_instance_token = f"dummy_instance_for_{cat_token}"
+                
+                if dummy_instance_token not in inst_db: # Only add if it doesn't exist
+                    inst_db[dummy_instance_token] = {
+                        "token": dummy_instance_token,
+                        "category_token": cat_token,
+                        "nbr_annotations": 0,
+                        "first_annotation_token": "",
+                        "last_annotation_token": ""
+                    }
+                    dummy_instance_count += 1
+        
+        if dummy_instance_count > 0:
+            log.info(f"Created {dummy_instance_count} dummy instances to satisfy devkit (for unused categories).")
+
         # --- Overwrite Files ---
         with json_file_lock:
             json.dump(list(inst_db.values()), open(instance_path, 'w'), indent=2)

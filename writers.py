@@ -20,8 +20,11 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 log = logging.getLogger(__name__)
 
 # --- File Conversion Helpers (from old IDD3DLidar/Camera Converters) ---
-# ... (convert_lidar_file and convert_camera_file functions remain unchanged) ...
 def convert_lidar_file(src_path, dst_path):
+    """
+    Converts a .pcd file to a .pcd.bin file.
+    If open3d is not available, creates an empty placeholder file.
+    """
     try:
         import numpy as np
         import open3d as o3d
@@ -41,6 +44,10 @@ def convert_lidar_file(src_path, dst_path):
         open(dst_path, 'wb').close()
 
 def convert_camera_file(src_path, dst_path):
+    """
+    Converts a .png file to a .jpg file.
+    If PIL is not available, does nothing.
+    """
     try:
         if not os.path.exists(src_path):
             log.warning(f"Source camera file not found: {src_path}")
@@ -108,6 +115,10 @@ class NuScenesWriter(BaseWriter):
             base_timestamp=new_base_timestamp
         )
 
+        # --- NEW: Pre-populate TokenManager with user's categories ---
+        self._pre_populate_categories()
+        # --- END NEW ---
+
         if not data.scenes:
             log.error("No scenes found in intermediate data. Cannot proceed."); return
         sequence_name = data.scenes[0].name
@@ -163,6 +174,101 @@ class NuScenesWriter(BaseWriter):
                     log.warning(f"Could not read last timestamp: {e}")
         if last_timestamp: log.info(f"Found existing data. Last timestamp: {last_timestamp}")
         return last_timestamp
+
+    # --- NEW METHOD to pre-load categories ---
+    def _pre_populate_categories(self):
+        """
+        Manually injects the user's official category tokens
+        into the TokenTimestampManager to ensure consistency.
+        """
+        log.info("Pre-populating TokenManager with official category tokens...")
+        
+        # This is the content from the user's category2.json file
+        official_categories = [
+          {
+            "token": "dc39d8b2858e4bc0b7ddf66ede8d734e",
+            "name": "vehicle.motorcycle",
+            "description": "vehicle.motorcycle category"
+          },
+          {
+            "token": "d411b4e8157d445193034d6f408900d3",
+            "name": "movable_object.bicyclerider",
+            "description": "movable_object.bicyclerider category"
+          },
+          {
+            "token": "e2325ce5697e45678ee0fe4017918290",
+            "name": "movable_object.tourcar",
+            "description": "movable_object.tourcar category"
+          },
+          {
+            "token": "9a438c7df65d4ae0b5e87f603a3e91b7",
+            "name": "movable_object.scooterrider",
+            "description": "movable_object.scooterrider category"
+          },
+          {
+            "token": "1046b59779f24cf7b55114161208b0f5",
+            "name": "vehicle.bus",
+            "description": "vehicle.bus category"
+          },
+          {
+            "token": "57c2b779b57b496297048ea55aaed2c7",
+            "name": "movable_object.bicyclegroup",
+            "description": "movable_object.bicyclegroup category"
+          },
+          {
+            "token": "869140488b264d7780ed9cc8233cb5ce",
+            "name": "movable_object.van",
+            "description": "movable_object.van category"
+          },
+          {
+            "token": "69d88d0df8274f56995aacff1982ec65",
+            "name": "vehicle.truck",
+            "description": "vehicle.truck category"
+          },
+          {
+            "token": "9a6c42f9792f40789bc0437eba0aef9b",
+            "name": "movable_object.pedestrian",
+            "description": "movable_object.pedestrian category"
+          },
+          {
+            "token": "f15d03bf64834024a0601aae7a07c156",
+            "name": "movable_object.scooter",
+            "description": "movable_object.scooter category"
+          },
+          {
+            "token": "366ad39f728a4ab5ae9a4146f528bd00",
+            "name": "vehicle.bicycle",
+            "description": "vehicle.bicycle category"
+          },
+          {
+            "token": "f0add8f1828d4b7ca20d135edd7ecd4e",
+            "name": "movable_object.unknown",
+            "description": "movable_object.unknown category"
+          },
+          {
+            "token": "6bc7bdefe76646e193288d5928a2d58a",
+            "name": "movable_object.unknown1",
+            "description": "movable_object.unknown1 category"
+          },
+          {
+            "token": "3305eeb43e684538b00bcc41fc38d84e",
+            "name": "vehicle.car",
+            "description": "vehicle.car category"
+          }
+        ]
+        
+        count = 0
+        for category in official_categories:
+            cat_name = category['name']
+            cat_token = category['token']
+            # We only add if it's not already in the manager
+            # (e.g. from token_registry.json)
+            if cat_name not in self.token_manager.category_tokens:
+                self.token_manager.category_tokens[cat_name] = cat_token
+                count += 1
+        
+        log.info(f"Injected {count} new official category tokens into TokenManager.")
+
 
     # --- JSON Writing Methods (called by write()) ---
 
@@ -322,20 +428,41 @@ class NuScenesWriter(BaseWriter):
             log.info(f"Merged and overwrote sample_data.json. Total items: {len(final_sample_data)}")
 
 
+    # --- MODIFIED METHOD ---
     def _write_category(self, instances):
+        """
+        Writes the category.json file.
+        Dumps all known categories from the TokenManager (which is pre-populated)
+        and any new categories found in the current dataset.
+        """
         new_categories = []
-        all_categories = {inst.category_name for inst in instances}
-        for cat_name in all_categories:
+        
+        # Get all unique category names from the current instances
+        all_category_names_from_data = {inst.category_name for inst in instances}
+        
+        # Add all pre-populated categories
+        for name, token in self.token_manager.category_tokens.items():
             new_categories.append({
-                "token": self.token_manager.get_category_token(cat_name),
-                "name": cat_name,
-                "description": f"{cat_name} category"
+                "token": token,
+                "name": name,
+                "description": f"{name} category"
             })
         
+        # Add any *new* categories from the data that weren't pre-populated
+        for name in all_category_names_from_data:
+            if name not in self.token_manager.category_tokens:
+                token = self.token_manager.get_category_token(name) # This will create a new one
+                new_categories.append({
+                    "token": token,
+                    "name": name,
+                    "description": f"{name} category"
+                })
+
+        # This will merge the pre-populated categories and any new ones
         merge_and_overwrite_json_list(
             os.path.join(self.annot_out_dir, 'category.json'), 
             new_categories, 
-            key_field='name'
+            key_field='name' # Use name as the unique key
         )
 
     def _write_instance_and_annotation(self, instances, annotations):

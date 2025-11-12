@@ -569,8 +569,9 @@ class NuScenesWriter(BaseWriter):
                         "token": dummy_instance_token,
                         "category_token": cat_token,
                         "nbr_annotations": 0,
-                        "first_annotation_token": "",
-                        "last_annotation_token": ""
+                        # --- FINAL FIX: Fill with dummy token ---
+                        "first_annotation_token": dummy_instance_token,
+                        "last_annotation_token": dummy_instance_token
                     }
                     dummy_instance_count += 1
         

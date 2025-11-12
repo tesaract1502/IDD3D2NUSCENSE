@@ -10,7 +10,8 @@ import json
 import shutil
 import logging
 from abc import ABC, abstractmethod
-from PIL import Image  # <-- Import for dummy map
+from PIL import Image  # For dummy map, if needed
+from datetime import datetime  # For log.json
 from intermediate_format import IntermediateData
 from utils import TokenTimestampManager, append_to_json_list, json_file_lock
 
@@ -59,7 +60,7 @@ def convert_camera_file(src_path, dst_path):
     If PIL is not available, does nothing.
     """
     try:
-        # from PIL import Image # No longer needed here, imported at top
+        # from PIL import Image # Imported at top
         
         if not os.path.exists(src_path):
             log.warning(f"Source camera file not found: {src_path}")
@@ -106,7 +107,7 @@ class NuScenesWriter(BaseWriter):
         self.annot_out_dir = None
         self.samples_out_dir = None
         self.sweeps_out_dir = None
-        self.maps_out_dir = None  # <-- ADDED FOR MAPS
+        self.maps_out_dir = None
 
     def write(self, data: IntermediateData, output_path: str):
         log.info(f"Initializing NuScenesWriter for output to: {output_path}")
@@ -116,11 +117,11 @@ class NuScenesWriter(BaseWriter):
         self.annot_out_dir = os.path.join(self.output_path, 'anotations')
         self.samples_out_dir = os.path.join(self.output_path, 'samples')
         self.sweeps_out_dir = os.path.join(self.output_path, 'sweeps')
-        self.maps_out_dir = os.path.join(self.output_path, 'maps')  # <-- ADDED FOR MAPS
+        self.maps_out_dir = os.path.join(self.output_path, 'maps')
 
         os.makedirs(self.annot_out_dir, exist_ok=True)
         os.makedirs(self.samples_out_dir, exist_ok=True)
-        os.makedirs(self.maps_out_dir, exist_ok=True)  # <-- ADDED FOR MAPS
+        os.makedirs(self.maps_out_dir, exist_ok=True)
 
         # --- 2. Initialize TokenManager (from build_..._pipeline) ---
         registry_path = os.path.join(self.annot_out_dir, 'token_registry.json')
@@ -134,6 +135,13 @@ class NuScenesWriter(BaseWriter):
             base_timestamp=new_base_timestamp
         )
 
+        # --- GET THE SEQUENCE NAME ---
+        if not data.scenes:
+            log.error("No scenes found in intermediate data. Cannot proceed.")
+            return
+        sequence_name = data.scenes[0].name
+        log.info(f"Processing sequence: {sequence_name}")
+
         # --- 3. Run Writing Tasks in Order ---
         log.info("Writing JSON metadata files...")
         
@@ -143,22 +151,29 @@ class NuScenesWriter(BaseWriter):
         # These stubs must be written first so tokens are available
         self._write_visibility()
         self._write_attribute()
-        self._write_map()  # <-- ADDED FOR MAPS
+        self._write_map()
         
         # Main data
         self._write_scene(data.scenes, data.samples)
+        self._write_log(data.scenes)
         self._write_sample(data.samples)
         self._write_ego_pose(data.ego_poses)
-        self._write_sample_data(data.sensor_data)
+        
+        # Pass sequence_name to the methods that need it
+        self._write_sample_data(data.sensor_data, sequence_name) # <-- MODIFIED
         
         # Annotations
         self._write_instance(data.instances)
         self._write_category(data.instances)
         self._write_sample_annotation(data.annotations, data.instances)
         
+        # File Manifest
+        self._write_file_manifest(data)
+
         # --- 4. Process Physical Files ---
         log.info("Converting and copying physical sensor files...")
-        self._process_sensor_files(data.sensor_data, data.sequence_path)
+        # Pass sequence_name to this method as well
+        self._process_sensor_files(data.sensor_data, data.sequence_path, sequence_name) # <-- MODIFIED
         
         # --- 5. Duplicate Sweeps (from IDD3DDuplicateSweepsConverter) ---
         log.info("Duplicating 'samples' directory to 'sweeps'...")
@@ -225,7 +240,7 @@ class NuScenesWriter(BaseWriter):
             
             new_entries.append({
                 "token": self.token_manager.get_scene_token(),
-                "log_token": "", # Stubbed log token
+                "log_token": self.token_manager.get_category_token(f"log_{if_scene.name}-{datetime.now().strftime('%Y-%m-%d')}"), # Link to log
                 "nbr_samples": len(samples_in_scene),
                 "first_sample_token": self.token_manager.get_frame_token(samples_in_scene[0].temp_frame_id),
                 "last_sample_token": self.token_manager.get_frame_token(samples_in_scene[-1].temp_frame_id),
@@ -267,7 +282,7 @@ class NuScenesWriter(BaseWriter):
             })
         append_to_json_list(os.path.join(self.annot_out_dir, 'ego_pose.json'), new_entries)
 
-    def _write_sample_data(self, sensor_data):
+    def _write_sample_data(self, sensor_data, sequence_name):
         new_entries = []
         
         sensor_groups = {}
@@ -280,24 +295,29 @@ class NuScenesWriter(BaseWriter):
             sorted_data = sorted(data_list, key=lambda x: x.timestamp_us)
             
             for i, if_data in enumerate(sorted_data):
-                sd_token = uuid.uuid4().hex # sample_data tokens are always unique
+                sd_token = uuid.uuid4().hex
                 is_camera = sensor_name.startswith("CAM_")
+                timestamp = if_data.timestamp_us
+
+                # --- NEW FILENAME LOGIC ---
+                # Format: {sequence_name}_frame_{timestamp}
+                output_filename_base = f"{sequence_name}_frame_{timestamp}"
                 
-                # Filename logic
                 if is_camera:
-                    filename_base = os.path.splitext(os.path.basename(if_data.original_filename))[0]
-                    output_filename = f"{filename_base}.jpg"
+                    output_filename = f"{output_filename_base}.jpg"
+                    fileformat = "jpg"
                 else:
-                    filename_base = os.path.splitext(if_data.original_filename)[0]
-                    output_filename = f"{filename_base}.pcd.bin"
+                    output_filename = f"{output_filename_base}.pcd.bin"
+                    fileformat = "pcd.bin"
+                # --- END NEW LOGIC ---
 
                 new_entries.append({
                     "token": sd_token,
                     "sample_token": self.token_manager.get_frame_token(if_data.temp_frame_id),
                     "ego_pose_token": self.token_manager.get_ego_pose_token(if_data.temp_frame_id),
                     "calibrated_sensor_token": self.token_manager.get_calibration_token(if_data.sensor_name),
-                    "filename": f"samples/{if_data.sensor_name}/{output_filename}", 
-                    "fileformat": "jpg" if is_camera else "pcd.bin",
+                    "filename": f"samples/{if_data.sensor_name}/{output_filename}",  # <-- This is now correct
+                    "fileformat": fileformat,
                     "width": 1440 if is_camera else 0,
                     "height": 1080 if is_camera else 0,
                     "timestamp": if_data.timestamp_us,
@@ -403,8 +423,8 @@ class NuScenesWriter(BaseWriter):
 
     def _write_map(self):
         """
-        Writes a static map.json file and a dummy map image.
-        This logic is from the old IDD3DMapConverter.
+        Writes a static map.json file.
+        The user is responsible for adding the .png file to the maps folder.
         """
         location = "Hyderabad"
         map_filename = f"maps/{location.lower()}.png"
@@ -429,35 +449,101 @@ class NuScenesWriter(BaseWriter):
                 log.error(f"FATAL: Could not write to map.json: {e}")
                 raise
         
-        # --- 2. Create the dummy hyderabad.png image ---
-        image_path = os.path.join(self.maps_out_dir, f"{location.lower()}.png")
-        if not os.path.exists(image_path):
-            try:
-                # Create a simple 10x10 black PNG
-                img = Image.new('RGB', (10, 10), color='black')
-                img.save(image_path, 'PNG')
-                log.info(f"Created dummy map file: {image_path}")
-            except Exception as e:
-                log.error(f"Could not create dummy map image: {e}")
+        # --- 2. Notify user about map file ---
+        log.info(f"User is responsible for adding '{location.lower()}.png' to the '{self.maps_out_dir}' directory.")
+
+
+    def _write_log(self, scenes):
+        """
+        Creates and appends log.json entries for each scene.
+        """
+        new_entries = []
+        for if_scene in scenes:
+            # Use scene name to create a unique logfile entry
+            logfile = f"{if_scene.name}-{datetime.now().strftime('%Y-%m-%d')}"
+            # Re-use category token logic to get a deterministic token
+            log_token = self.token_manager.get_category_token(f"log_{logfile}") 
+            
+            new_entries.append({
+                "token": log_token,
+                "logfile": logfile,
+                "vehicle": "stub_vehicle", # Stubbed
+                "date_captured": datetime.now().strftime('%Y-%m-%d'), # Stubbed
+                "location": "Hyderabad" # Stubbed
+            })
+        append_to_json_list(os.path.join(self.annot_out_dir, 'log.json'), new_entries)
+
+    def _write_file_manifest(self, data: IntermediateData):
+        """
+        Creates a manifest of source-to-output file paths for traceability.
+        """
+        new_entries = []
+        
+        frame_to_sensor_data = {}
+        for sd in data.sensor_data:
+            if sd.temp_frame_id not in frame_to_sensor_data:
+                frame_to_sensor_data[sd.temp_frame_id] = []
+            frame_to_sensor_data[sd.temp_frame_id].append(sd)
+
+        for if_sample in data.samples:
+            frame_id = if_sample.temp_frame_id
+            sequence_name = if_sample.scene_name
+            
+            manifest_entry = {
+                "frame_id": frame_id,
+                "sequence": sequence_name,
+                "sample_token": self.token_manager.get_frame_token(frame_id),
+                "sensors": []
+            }
+
+            if frame_id not in frame_to_sensor_data:
+                continue
+
+            for sd in frame_to_sensor_data[frame_id]:
+                timestamp = sd.timestamp_us
+                output_filename_base = f"{sequence_name}_frame_{timestamp}"
+
+                if sd.sensor_name.startswith("CAM_"):
+                    output_filename = f"{output_filename_base}.jpg"
+                    source_file = f"{sequence_name}/camera/{sd.original_filename}"
+                else: # LIDAR_TOP
+                    output_filename = f"{output_filename_base}.pcd.bin"
+                    source_file = f"{sequence_name}/lidar/{sd.original_filename}"
+
+                manifest_entry["sensors"].append({
+                    "channel": sd.sensor_name,
+                    "source_file": source_file,
+                    "output_file": f"samples/{sd.sensor_name}/{output_filename}"
+                })
+            
+            new_entries.append(manifest_entry)
+            
+        append_to_json_list(os.path.join(self.annot_out_dir, 'file_manifest.json'), new_entries)
+
 
     # --- File Processing Methods (called by write()) ---
     
-    def _process_sensor_files(self, sensor_data, sequence_path):
+    def _process_sensor_files(self, sensor_data, sequence_path, sequence_name):
         """
         Loops through sensor data, finds original files,
-        converts, and saves them.
+        converts, and saves them using the timestamped naming convention.
         """
         num_lidar = 0
         num_camera = 0
         
         for sd in sensor_data:
-            # 1. Find Source Path
+            timestamp = sd.timestamp_us
+            
+            # --- NEW FILENAME LOGIC ---
+            # Format: {sequence_name}_frame_{timestamp}
+            output_filename_base = f"{sequence_name}_frame_{timestamp}"
+            
             if sd.sensor_name == "LIDAR_TOP":
+                # 1. Find Source Path
                 src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
                 
                 # 2. Define Destination Path
-                filename_base = os.path.splitext(sd.original_filename)[0]
-                output_filename = f"{filename_base}.pcd.bin"
+                output_filename = f"{output_filename_base}.pcd.bin" # <-- Correct name
                 dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
@@ -467,12 +553,12 @@ class NuScenesWriter(BaseWriter):
                 num_lidar += 1
             
             else: # It's a camera
+                # 1. Find Source Path
                 # 'original_filename' is e.g., "cam0/00000.png"
                 src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
                 
                 # 2. Define Destination Path
-                filename_base = os.path.splitext(os.path.basename(sd.original_filename))[0]
-                output_filename = f"{filename_base}.jpg"
+                output_filename = f"{output_filename_base}.jpg" # <-- Correct name
                 dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)

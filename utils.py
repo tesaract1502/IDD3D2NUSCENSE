@@ -14,16 +14,12 @@ from datetime import datetime
 log = logging.getLogger(__name__)
 
 # This lock is used by append_to_json_list to prevent race conditions
-# when multiple sequences are processed (in the future).
 json_file_lock = threading.Lock()
 
 def append_to_json_list(file_path, new_data_list):
     """
     Safely appends a list of new data to an existing JSON file
     that is expected to contain a list.
-    
-    If the file doesn't exist or is corrupt, it will be overwritten.
-    If the file exists but isn't a list, it will be overwritten.
     """
     if not new_data_list:
         log.info(f"No new data to append to {os.path.basename(file_path)}")
@@ -64,7 +60,6 @@ class TokenTimestampManager:
         self.frame_interval_us = int(1_000_000 / self.frame_rate_hz)
         
         if base_timestamp is None:
-            # This is the default start time if no other time is found
             self.base_timestamp = 1640995200000000 
         else:
             self.base_timestamp = base_timestamp
@@ -75,8 +70,12 @@ class TokenTimestampManager:
         self.ego_pose_tokens = {}     # Map: temp_frame_id -> ego_pose_token
         self.scene_token = None
         
-        # Global tokens (category, sensor) are loaded from the registry.
+        # --- FIXED: Separate dictionaries for each token type ---
         self.category_tokens = {}
+        self.attribute_tokens = {}
+        self.visibility_tokens = {}
+        self.map_tokens = {}
+        self.log_tokens = {}
         self.sensor_tokens = {}
         self.calibration_tokens = {}
         
@@ -85,20 +84,23 @@ class TokenTimestampManager:
         
     def load_registry(self):
         """
-        Loads ONLY global tokens (category, sensor, calibration)
-        from the registry path if it exists.
+        Loads ONLY global tokens from the registry path if it exists.
         """
         if self.registry_path and os.path.exists(self.registry_path):
             try:
                 with open(self.registry_path, 'r') as f:
                     registry = json.load(f)
                 
+                # Load all token types
                 self.category_tokens = registry.get('category_tokens', {})
+                self.attribute_tokens = registry.get('attribute_tokens', {})
+                self.visibility_tokens = registry.get('visibility_tokens', {})
+                self.map_tokens = registry.get('map_tokens', {})
+                self.log_tokens = registry.get('log_tokens', {})
                 self.sensor_tokens = registry.get('sensor_tokens', {})
                 self.calibration_tokens = registry.get('calibration_tokens', {})
                 
                 log.info(f"Loaded {len(self.category_tokens)} global category tokens from registry.")
-                log.info(f"Loaded {len(self.sensor_tokens)} global sensor tokens from registry.")
  
             except Exception as e:
                 log.warning(f"Could not load token registry: {e}")
@@ -127,11 +129,37 @@ class TokenTimestampManager:
             self.instance_tokens[obj_id] = uuid.uuid4().hex
         return self.instance_tokens[obj_id]
     
+    # --- FIXED: Specific getters for each token type ---
+    
     def get_category_token(self, category_name):
-        """Gets/creates a global token for a category name."""
+        """Gets/creates a global token for an object CATEGORY."""
         if category_name not in self.category_tokens:
             self.category_tokens[category_name] = uuid.uuid4().hex
         return self.category_tokens[category_name]
+        
+    def get_attribute_token(self, attr_name):
+        """Gets/creates a global token for an ATTRIBUTE."""
+        if attr_name not in self.attribute_tokens:
+            self.attribute_tokens[attr_name] = uuid.uuid4().hex
+        return self.attribute_tokens[attr_name]
+        
+    def get_visibility_token(self, vis_level):
+        """Gets/creates a global token for a VISIBILITY level."""
+        if vis_level not in self.visibility_tokens:
+            self.visibility_tokens[vis_level] = uuid.uuid4().hex
+        return self.visibility_tokens[vis_level]
+
+    def get_map_token(self, map_name):
+        """Gets/creates a global token for a MAP."""
+        if map_name not in self.map_tokens:
+            self.map_tokens[map_name] = uuid.uuid4().hex
+        return self.map_tokens[map_name]
+
+    def get_log_token(self, log_name):
+        """Gets/creates a global token for a LOG."""
+        if log_name not in self.log_tokens:
+            self.log_tokens[log_name] = uuid.uuid4().hex
+        return self.log_tokens[log_name]
     
     def get_sensor_token(self, sensor_name):
         """Gets/creates a global token for a sensor name."""
@@ -157,12 +185,17 @@ class TokenTimestampManager:
     
     def save_registry(self, output_path):
         """
-        Save ONLY global tokens (category, sensor, calibration) to the registry.
+        Save ONLY global tokens to the registry.
         """
         registry = {
             'base_timestamp': self.base_timestamp,
             'frame_rate_hz': self.frame_rate_hz,
+            # --- FIXED: Save all dictionaries ---
             'category_tokens': self.category_tokens,
+            'attribute_tokens': self.attribute_tokens,
+            'visibility_tokens': self.visibility_tokens,
+            'map_tokens': self.map_tokens,
+            'log_tokens': self.log_tokens,
             'sensor_tokens': self.sensor_tokens,
             'calibration_tokens': self.calibration_tokens
         }

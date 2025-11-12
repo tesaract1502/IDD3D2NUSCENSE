@@ -10,43 +10,29 @@ import json
 import shutil
 import logging
 from abc import ABC, abstractmethod
-from PIL import Image  # For dummy map, if needed
-from datetime import datetime  # For log.json
+from PIL import Image
+from datetime import datetime
 from intermediate_format import IntermediateData
-from utils import TokenTimestampManager, append_to_json_list, json_file_lock
+from utils import TokenTimestampManager, append_to_json_list, json_file_lock, merge_and_overwrite_json_list
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 log = logging.getLogger(__name__)
 
 # --- File Conversion Helpers (from old IDD3DLidar/Camera Converters) ---
-
+# ... (convert_lidar_file and convert_camera_file functions remain unchanged) ...
 def convert_lidar_file(src_path, dst_path):
-    """
-    Converts a .pcd file to a .pcd.bin file.
-    If open3d is not available, creates an empty placeholder file.
-    """
     try:
         import numpy as np
         import open3d as o3d
-        
         if not os.path.exists(src_path):
             log.warning(f"Source LiDAR file not found: {src_path}")
-            open(dst_path, 'wb').close() # Create empty file
-            return
-
+            open(dst_path, 'wb').close(); return
         pcd = o3d.io.read_point_cloud(src_path)
         xyz = np.asarray(pcd.points, dtype=np.float32)
-        # nuScenes .pcd.bin format is [x, y, z, intensity]
-        # We only have xyz, so we stub intensity.
         intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
-        
-        # Combine xyz and intensity
         pts = np.hstack((xyz, intensity))
-        
-        # Save to binary file
         pts.astype(np.float32).tofile(dst_path)
-        
     except ImportError:
         log.warning(f"open3d not available. Creating empty placeholder for {dst_path}")
         open(dst_path, 'wb').close()
@@ -55,22 +41,14 @@ def convert_lidar_file(src_path, dst_path):
         open(dst_path, 'wb').close()
 
 def convert_camera_file(src_path, dst_path):
-    """
-    Converts a .png file to a .jpg file.
-    If PIL is not available, does nothing.
-    """
     try:
-        # from PIL import Image # Imported at top
-        
         if not os.path.exists(src_path):
             log.warning(f"Source camera file not found: {src_path}")
             return
-            
         img = Image.open(src_path)
         if img.mode != 'RGB':
             img = img.convert('RGB')
         img.save(dst_path, 'JPEG', quality=95)
-        
     except ImportError:
         log.warning(f"PIL/Pillow not available. Skipping camera conversion for {src_path}")
     except Exception as e:
@@ -79,26 +57,18 @@ def convert_camera_file(src_path, dst_path):
 # -----------------------------------------------------------------------------
 #  BASE WRITER
 # -----------------------------------------------------------------------------
-
 class BaseWriter(ABC):
-    """
-    Abstract base class for all dataset writers.
-    """
     @abstractmethod
     def write(self, data: IntermediateData, output_path: str):
-        """
-        Consumes the IntermediateData object and writes the dataset
-        to 'output_path'.
-        """
         pass
 
 # -----------------------------------------------------------------------------
 #  NUSCENES WRITER
 # -----------------------------------------------------------------------------
-
 class NuScenesWriter(BaseWriter):
     """
     Writes data to the nuScenes dataset format.
+    Handles merging and linking data across multiple runs.
     """
     
     def __init__(self):
@@ -108,12 +78,17 @@ class NuScenesWriter(BaseWriter):
         self.samples_out_dir = None
         self.sweeps_out_dir = None
         self.maps_out_dir = None
+        
+        # --- NEW: Holders for cross-run data ---
+        self.generated_log_tokens = []
+        self.all_sample_annotations = []
+        self.instance_db = {} # Holds all instance data
 
     def write(self, data: IntermediateData, output_path: str):
         log.info(f"Initializing NuScenesWriter for output to: {output_path}")
         self.output_path = os.path.abspath(output_path)
         
-        # --- 1. Setup Output Directories (from IDD3DDataLoader) ---
+        # --- 1. Setup Output Directories ---
         self.annot_out_dir = os.path.join(self.output_path, 'anotations')
         self.samples_out_dir = os.path.join(self.output_path, 'samples')
         self.sweeps_out_dir = os.path.join(self.output_path, 'sweeps')
@@ -123,10 +98,8 @@ class NuScenesWriter(BaseWriter):
         os.makedirs(self.samples_out_dir, exist_ok=True)
         os.makedirs(self.maps_out_dir, exist_ok=True)
 
-        # --- 2. Initialize TokenManager (from build_..._pipeline) ---
+        # --- 2. Initialize TokenManager ---
         registry_path = os.path.join(self.annot_out_dir, 'token_registry.json')
-        
-        # Find the last timestamp to ensure new timestamps are sequential
         last_timestamp = self._get_last_timestamp()
         new_base_timestamp = (last_timestamp + 20_000_000) if last_timestamp else None # 20-sec gap
         
@@ -135,51 +108,41 @@ class NuScenesWriter(BaseWriter):
             base_timestamp=new_base_timestamp
         )
 
-        # --- GET THE SEQUENCE NAME ---
         if not data.scenes:
-            log.error("No scenes found in intermediate data. Cannot proceed.")
-            return
+            log.error("No scenes found in intermediate data. Cannot proceed."); return
         sequence_name = data.scenes[0].name
         log.info(f"Processing sequence: {sequence_name}")
 
         # --- 3. Run Writing Tasks in Order ---
         log.info("Writing JSON metadata files...")
         
-        self._write_calibrated_sensor(data.calibrations)
-        self._write_sensor(data.calibrations) # Uses calibration data
-        
-        # These stubs must be written first so tokens are available
+        # --- Dictionary Files (Merge & Overwrite) ---
+        self._write_sensor_and_calib(data.calibrations)
         self._write_visibility()
         self._write_attribute()
-        self._write_map()
         
-        # Main data
-        self._write_scene(data.scenes, data.samples)
+        # --- Log Files (Append) ---
         self._write_log(data.scenes)
-        self._write_sample(data.samples)
-        self._write_ego_pose(data.ego_poses)
-        
-        # Pass sequence_name to the methods that need it
-        self._write_sample_data(data.sensor_data, sequence_name) # <-- MODIFIED
-        
-        # Annotations
-        self._write_instance(data.instances)
-        self._write_category(data.instances)
-        self._write_sample_annotation(data.annotations, data.instances)
-        
-        # File Manifest
-        self._write_file_manifest(data)
+        self._write_map() # Must be after _write_log
+        self._write_file_manifest(data) # Can be appended
 
+        # --- Linked-List Files (Read, Merge, Re-link, Overwrite) ---
+        self._write_sample_and_ego_pose(data.samples, data.ego_poses)
+        self._write_sample_data(data.sensor_data, sequence_name)
+        
+        # --- Annotation & Instance (Most complex linking) ---
+        self._write_category(data.instances) # Must be before instance/ann
+        self._write_instance_and_annotation(data.instances, data.annotations)
+        
         # --- 4. Process Physical Files ---
         log.info("Converting and copying physical sensor files...")
-        # Pass sequence_name to this method as well
-        self._process_sensor_files(data.sensor_data, data.sequence_path, sequence_name) # <-- MODIFIED
+        self._process_sensor_files(data.sensor_data, data.sequence_path, sequence_name)
         
-        # --- 5. Duplicate Sweeps (from IDD3DDuplicateSweepsConverter) ---
+        # --- 5. Duplicate Sweeps ---
         log.info("Duplicating 'samples' directory to 'sweeps'...")
         self._duplicate_sweeps()
         
-        # --- 6. Save Token Registry (from IDD3DTokenRegistrySaver) ---
+        # --- 6. Save Token Registry ---
         log.info("Saving global token registry...")
         self.token_manager.save_registry(registry_path)
         
@@ -187,7 +150,6 @@ class NuScenesWriter(BaseWriter):
         log.info(f"Output successfully written to: {self.output_path}")
 
     def _get_last_timestamp(self):
-        """Finds the last timestamp from sample.json to ensure continuity."""
         sample_json_path = os.path.join(self.annot_out_dir, 'sample.json')
         last_timestamp = None
         if os.path.exists(sample_json_path):
@@ -199,190 +161,267 @@ class NuScenesWriter(BaseWriter):
                             last_timestamp = samples[-1].get('timestamp')
                 except Exception as e:
                     log.warning(f"Could not read last timestamp: {e}")
-        
-        if last_timestamp:
-            log.info(f"Found existing data. Last timestamp: {last_timestamp}")
+        if last_timestamp: log.info(f"Found existing data. Last timestamp: {last_timestamp}")
         return last_timestamp
 
     # --- JSON Writing Methods (called by write()) ---
 
-    def _write_calibrated_sensor(self, calibrations):
-        new_entries = []
+    def _write_sensor_and_calib(self, calibrations):
+        new_sensors = []
+        new_calib_sensors = []
+        
         for if_calib in calibrations:
-            new_entries.append({
+            sensor_token = self.token_manager.get_sensor_token(if_calib.sensor_name)
+            is_camera = len(if_calib.camera_intrinsic) > 0
+            
+            new_sensors.append({
+                "token": sensor_token,
+                "modality": "camera" if is_camera else "lidar",
+                "channel": if_calib.sensor_name,
+            })
+            
+            new_calib_sensors.append({
                 "token": self.token_manager.get_calibration_token(if_calib.sensor_name),
-                "sensor_token": self.token_manager.get_sensor_token(if_calib.sensor_name),
+                "sensor_token": sensor_token,
                 "translation": if_calib.translation,
                 "rotation": if_calib.rotation,
                 "camera_intrinsic": if_calib.camera_intrinsic
             })
-        append_to_json_list(os.path.join(self.annot_out_dir, 'calibrated_sensor.json'), new_entries)
-
-    def _write_sensor(self, calibrations):
-        new_entries = []
-        for if_calib in calibrations:
-            is_camera = len(if_calib.camera_intrinsic) > 0
-            new_entries.append({
-                "token": self.token_manager.get_sensor_token(if_calib.sensor_name),
-                "modality": "camera" if is_camera else "lidar",
-                "channel": if_calib.sensor_name,
-            })
-        append_to_json_list(os.path.join(self.annot_out_dir, 'sensor.json'), new_entries)
-
-    def _write_scene(self, scenes, samples):
-        new_entries = []
-        for if_scene in scenes:
-            samples_in_scene = [s for s in samples if s.scene_name == if_scene.name]
-            if not samples_in_scene:
-                continue
-            
-            samples_in_scene.sort(key=lambda x: x.timestamp_us)
-            
-            new_entries.append({
-                "token": self.token_manager.get_scene_token(),
-                "log_token": self.token_manager.get_category_token(f"log_{if_scene.name}-{datetime.now().strftime('%Y-%m-%d')}"), # Link to log
-                "nbr_samples": len(samples_in_scene),
-                "first_sample_token": self.token_manager.get_frame_token(samples_in_scene[0].temp_frame_id),
-                "last_sample_token": self.token_manager.get_frame_token(samples_in_scene[-1].temp_frame_id),
-                "name": if_scene.name,
-                "description": if_scene.description
-            })
-        append_to_json_list(os.path.join(self.annot_out_dir, 'scene.json'), new_entries)
-
-    def _write_sample(self, samples):
-        new_entries = []
-        sorted_samples = sorted(samples, key=lambda x: x.timestamp_us)
         
-        for i, if_sample in enumerate(sorted_samples):
-            prev_token = ""
-            if i > 0 and sorted_samples[i-1].scene_name == if_sample.scene_name:
-                prev_token = self.token_manager.get_frame_token(sorted_samples[i-1].temp_frame_id)
-            
-            next_token = ""
-            if i < len(sorted_samples) - 1 and sorted_samples[i+1].scene_name == if_sample.scene_name:
-                next_token = self.token_manager.get_frame_token(sorted_samples[i+1].temp_frame_id)
-            
-            new_entries.append({
+        # Use merge_and_overwrite to prevent duplicates
+        merge_and_overwrite_json_list(
+            os.path.join(self.annot_out_dir, 'sensor.json'), 
+            new_sensors, 
+            key_field='channel'
+        )
+        merge_and_overwrite_json_list(
+            os.path.join(self.annot_out_dir, 'calibrated_sensor.json'), 
+            new_calib_sensors, 
+            key_field='sensor_token'
+        )
+
+    def _write_sample_and_ego_pose(self, samples, ego_poses):
+        # --- Read Existing Data ---
+        sample_path = os.path.join(self.annot_out_dir, 'sample.json')
+        ego_pose_path = os.path.join(self.annot_out_dir, 'ego_pose.json')
+        
+        all_samples = []
+        all_ego_poses = []
+
+        with json_file_lock:
+            if os.path.exists(sample_path):
+                try: all_samples = json.load(open(sample_path, 'r'))
+                except: log.warning("sample.json corrupted. Overwriting.")
+            if os.path.exists(ego_pose_path):
+                try: all_ego_poses = json.load(open(ego_pose_path, 'r'))
+                except: log.warning("ego_pose.json corrupted. Overwriting.")
+        
+        # --- Add New Data ---
+        for if_sample in samples:
+            all_samples.append({
                 "token": self.token_manager.get_frame_token(if_sample.temp_frame_id),
                 "timestamp": if_sample.timestamp_us,
-                "prev": prev_token,
-                "next": next_token,
                 "scene_token": self.token_manager.get_scene_token() # Assumes one scene per run
             })
-        append_to_json_list(os.path.join(self.annot_out_dir, 'sample.json'), new_entries)
-
-    def _write_ego_pose(self, ego_poses):
-        new_entries = []
+        
         for if_pose in ego_poses:
-            new_entries.append({
+            all_ego_poses.append({
                 "token": self.token_manager.get_ego_pose_token(if_pose.temp_frame_id),
                 "timestamp": if_pose.timestamp_us,
                 "translation": if_pose.translation,
                 "rotation": if_pose.rotation
             })
-        append_to_json_list(os.path.join(self.annot_out_dir, 'ego_pose.json'), new_entries)
+
+        # --- Sort and Re-link ---
+        all_samples.sort(key=lambda x: x['timestamp'])
+        all_ego_poses.sort(key=lambda x: x['timestamp'])
+        
+        scene_tokens = {s['scene_token'] for s in all_samples}
+        final_samples = []
+        
+        for scene_token in scene_tokens:
+            scene_samples = [s for s in all_samples if s['scene_token'] == scene_token]
+            for i, sample in enumerate(scene_samples):
+                sample['prev'] = scene_samples[i-1]['token'] if i > 0 else ""
+                sample['next'] = scene_samples[i+1]['token'] if i < len(scene_samples) - 1 else ""
+            final_samples.extend(scene_samples)
+        
+        # --- Overwrite Files ---
+        with json_file_lock:
+            json.dump(final_samples, open(sample_path, 'w'), indent=2)
+            log.info(f"Merged and overwrote sample.json. Total items: {len(final_samples)}")
+            json.dump(all_ego_poses, open(ego_pose_path, 'w'), indent=2)
+            log.info(f"Merged and overwrote ego_pose.json. Total items: {len(all_ego_poses)}")
+        
+        # --- Add Scene (Append is OK here) ---
+        if samples:
+            new_scene = {
+                "token": self.token_manager.get_scene_token(),
+                "log_token": self.generated_log_tokens[-1] if self.generated_log_tokens else "",
+                "nbr_samples": len(samples),
+                "first_sample_token": self.token_manager.get_frame_token(samples[0].temp_frame_id),
+                "last_sample_token": self.token_manager.get_frame_token(samples[-1].temp_frame_id),
+                "name": samples[0].scene_name,
+                "description": f"Scene {samples[0].scene_name}"
+            }
+            append_to_json_list(os.path.join(self.annot_out_dir, 'scene.json'), [new_scene])
+
 
     def _write_sample_data(self, sensor_data, sequence_name):
-        new_entries = []
+        sample_data_path = os.path.join(self.annot_out_dir, 'sample_data.json')
         
-        sensor_groups = {}
-        for sd in sensor_data:
-            if sd.sensor_name not in sensor_groups:
-                sensor_groups[sd.sensor_name] = []
-            sensor_groups[sd.sensor_name].append(sd)
+        all_sample_data = []
+        with json_file_lock:
+            if os.path.exists(sample_data_path):
+                try: all_sample_data = json.load(open(sample_data_path, 'r'))
+                except: log.warning("sample_data.json corrupted. Overwriting.")
 
-        for sensor_name, data_list in sensor_groups.items():
-            sorted_data = sorted(data_list, key=lambda x: x.timestamp_us)
+        for if_data in sensor_data:
+            sd_token = uuid.uuid4().hex
+            is_camera = if_data.sensor_name.startswith("CAM_")
+            timestamp = if_data.timestamp_us
+            output_filename_base = f"{sequence_name}_frame_{timestamp}"
             
-            for i, if_data in enumerate(sorted_data):
-                sd_token = uuid.uuid4().hex
-                is_camera = sensor_name.startswith("CAM_")
-                timestamp = if_data.timestamp_us
+            if is_camera:
+                output_filename = f"{output_filename_base}.jpg"
+                fileformat = "jpg"
+            else:
+                output_filename = f"{output_filename_base}.pcd.bin"
+                fileformat = "pcd.bin"
 
-                # --- NEW FILENAME LOGIC ---
-                # Format: {sequence_name}_frame_{timestamp}
-                output_filename_base = f"{sequence_name}_frame_{timestamp}"
-                
-                if is_camera:
-                    output_filename = f"{output_filename_base}.jpg"
-                    fileformat = "jpg"
-                else:
-                    output_filename = f"{output_filename_base}.pcd.bin"
-                    fileformat = "pcd.bin"
-                # --- END NEW LOGIC ---
-
-                new_entries.append({
-                    "token": sd_token,
-                    "sample_token": self.token_manager.get_frame_token(if_data.temp_frame_id),
-                    "ego_pose_token": self.token_manager.get_ego_pose_token(if_data.temp_frame_id),
-                    "calibrated_sensor_token": self.token_manager.get_calibration_token(if_data.sensor_name),
-                    "filename": f"samples/{if_data.sensor_name}/{output_filename}",  # <-- This is now correct
-                    "fileformat": fileformat,
-                    "width": 1440 if is_camera else 0,
-                    "height": 1080 if is_camera else 0,
-                    "timestamp": if_data.timestamp_us,
-                    "is_key_frame": if_data.is_keyframe,
-                    "next": "", # Stubbed for this simple append-only logic
-                    "prev": ""  # Stubbed for this simple append-only logic
-                })
-        
-        log.warning("sample_data.json 'prev' and 'next' tokens are not linked in this version.")
-        append_to_json_list(os.path.join(self.annot_out_dir, 'sample_data.json'), new_entries)
-
-    def _write_instance(self, instances):
-        new_entries = []
-        for if_inst in instances:
-            new_entries.append({
-                "token": self.token_manager.get_instance_token(if_inst.temp_instance_id),
-                "category_token": self.token_manager.get_category_token(if_inst.category_name),
-                "nbr_annotations": 0, # Stubbed
-                "first_annotation_token": "", # Stubbed
-                "last_annotation_token": ""   # Stubbed
+            all_sample_data.append({
+                "token": sd_token,
+                "sample_token": self.token_manager.get_frame_token(if_data.temp_frame_id),
+                "ego_pose_token": self.token_manager.get_ego_pose_token(if_data.temp_frame_id),
+                "calibrated_sensor_token": self.token_manager.get_calibration_token(if_data.sensor_name),
+                "filename": f"samples/{if_data.sensor_name}/{output_filename}",
+                "fileformat": fileformat,
+                "width": 1440 if is_camera else 0,
+                "height": 1080 if is_camera else 0,
+                "timestamp": if_data.timestamp_us,
+                "is_key_frame": if_data.is_keyframe,
             })
-        log.warning("instance.json nbr_annotations, first/last tokens are not linked.")
-        append_to_json_list(os.path.join(self.annot_out_dir, 'instance.json'), new_entries)
         
+        # --- Group, Sort, and Re-link ---
+        sensor_groups = {}
+        for sd in all_sample_data:
+            token = sd['calibrated_sensor_token']
+            if token not in sensor_groups: sensor_groups[token] = []
+            sensor_groups[token].append(sd)
+
+        final_sample_data = []
+        for sensor_token, sd_list in sensor_groups.items():
+            sorted_list = sorted(sd_list, key=lambda x: x['timestamp'])
+            for i, sd in enumerate(sorted_list):
+                sd['prev'] = sorted_list[i-1]['token'] if i > 0 else ""
+                sd['next'] = sorted_list[i+1]['token'] if i < len(sorted_list) - 1 else ""
+            final_sample_data.extend(sorted_list)
+        
+        with json_file_lock:
+            json.dump(final_sample_data, open(sample_data_path, 'w'), indent=2)
+            log.info(f"Merged and overwrote sample_data.json. Total items: {len(final_sample_data)}")
+
+
     def _write_category(self, instances):
-        new_entries = []
+        new_categories = []
         all_categories = {inst.category_name for inst in instances}
-        
         for cat_name in all_categories:
-            new_entries.append({
+            new_categories.append({
                 "token": self.token_manager.get_category_token(cat_name),
                 "name": cat_name,
                 "description": f"{cat_name} category"
             })
-        append_to_json_list(os.path.join(self.annot_out_dir, 'category.json'), new_entries)
-
-    def _write_sample_annotation(self, annotations, instances):
-        new_entries = []
-        inst_cat_map = {inst.temp_instance_id: inst.category_name for inst in instances}
         
-        for if_ann in annotations:
-            category_name = inst_cat_map.get(if_ann.temp_instance_id, "")
-            attribute_tokens = []
-            if category_name.startswith('vehicle.'):
-                attribute_tokens = [self.token_manager.get_category_token("vehicle.moving")]
-            elif category_name.startswith('human.'):
-                attribute_tokens = [self.token_manager.get_category_token("pedestrian.moving")]
+        merge_and_overwrite_json_list(
+            os.path.join(self.annot_out_dir, 'category.json'), 
+            new_categories, 
+            key_field='name'
+        )
+
+    def _write_instance_and_annotation(self, instances, annotations):
+        instance_path = os.path.join(self.annot_out_dir, 'instance.json')
+        ann_path = os.path.join(self.annot_out_dir, 'sample_annotation.json')
+
+        # --- Read Existing Data ---
+        with json_file_lock:
+            try:
+                all_anns = json.load(open(ann_path, 'r')) if os.path.exists(ann_path) else []
+            except: all_anns = []; log.warning("sample_annotation.json corrupted.")
             
-            new_entries.append({
-                "token": self.token_manager.generate_annotation_token(),
-                "sample_token": self.token_manager.get_frame_token(if_ann.temp_frame_id),
-                "instance_token": self.token_manager.get_instance_token(if_ann.temp_instance_id),
-                "attribute_tokens": attribute_tokens,
-                "visibility_token": self.token_manager.get_category_token("v4-0"), # Stubbed: 80-100%
-                "translation": if_ann.translation,
-                "size": if_ann.size,
-                "rotation": if_ann.rotation,
-                "prev": "", "next": "", # Stubbed
-                "num_lidar_pts": 0, "num_radar_pts": 0 # Stubbed
-            })
-        log.warning("sample_annotation.json 'prev' and 'next' tokens are not linked.")
-        append_to_json_list(os.path.join(self.annot_out_dir, 'sample_annotation.json'), new_entries)
+            try:
+                inst_list = json.load(open(instance_path, 'r')) if os.path.exists(instance_path) else []
+                inst_db = {i['token']: i for i in inst_list} # key by token
+            except: inst_db = {}; log.warning("instance.json corrupted.")
+
+        # --- Process New Data ---
+        new_anns_by_inst_id = {} # key by temp_instance_id
+        for ann in annotations:
+            if ann.temp_instance_id not in new_anns_by_inst_id:
+                new_anns_by_inst_id[ann.temp_instance_id] = []
+            new_anns_by_inst_id[ann.temp_instance_id].append(ann)
+
+        inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
+
+        for temp_inst_id, new_anns_list in new_anns_by_inst_id.items():
+            inst_token = self.token_manager.get_instance_token(temp_inst_id)
+            
+            # Sort new annotations
+            new_anns_list.sort(key=lambda x: x.timestamp_us)
+            
+            # Find link to existing data
+            last_ann_token_from_existing = ""
+            if inst_token in inst_db:
+                last_ann_token_from_existing = inst_db[inst_token]['last_annotation_token']
+
+            generated_tokens = [self.token_manager.generate_annotation_token() for _ in new_anns_list]
+            
+            for i, if_ann in enumerate(new_anns_list):
+                category_name = inst_name_map.get(temp_inst_id, "")
+                attribute_tokens = []
+                if category_name.startswith('vehicle.'):
+                    attribute_tokens = [self.token_manager.get_category_token("vehicle.moving")]
+                elif category_name.startswith('human.'):
+                    attribute_tokens = [self.token_manager.get_category_token("pedestrian.moving")]
+
+                ann_token = generated_tokens[i]
+                prev_token = generated_tokens[i-1] if i > 0 else last_ann_token_from_existing
+                next_token = generated_tokens[i+1] if i < len(generated_tokens) - 1 else ""
+                
+                all_anns.append({
+                    "token": ann_token,
+                    "sample_token": self.token_manager.get_frame_token(if_ann.temp_frame_id),
+                    "instance_token": inst_token,
+                    "attribute_tokens": attribute_tokens,
+                    "visibility_token": self.token_manager.get_category_token("v4-0"),
+                    "translation": if_ann.translation,
+                    "size": if_ann.size,
+                    "rotation": if_ann.rotation,
+                    "prev": prev_token, "next": next_token,
+                    "num_lidar_pts": 0, "num_radar_pts": 0
+                })
+
+            # --- Create / Update Instance DB Entry ---
+            if inst_token not in inst_db:
+                inst_db[inst_token] = {
+                    "token": inst_token,
+                    "category_token": self.token_manager.get_category_token(inst_name_map.get(temp_inst_id, "")),
+                    "nbr_annotations": len(generated_tokens),
+                    "first_annotation_token": generated_tokens[0],
+                    "last_annotation_token": generated_tokens[-1]
+                }
+            else:
+                inst_db[inst_token]["nbr_annotations"] += len(generated_tokens)
+                inst_db[inst_token]["last_annotation_token"] = generated_tokens[-1]
+        
+        # --- Overwrite Files ---
+        with json_file_lock:
+            json.dump(list(inst_db.values()), open(instance_path, 'w'), indent=2)
+            log.info(f"Merged and overwrote instance.json. Total items: {len(inst_db)}")
+            json.dump(all_anns, open(ann_path, 'w'), indent=2)
+            log.info(f"Merged and overwrote sample_annotation.json. Total items: {len(all_anns)}")
+
 
     def _write_visibility(self):
-        """Writes a static visibility.json file."""
         vis_levels = [
             {"level": "v1-0", "description": "visibility 0-40%"},
             {"level": "v2-0", "description": "visibility 40-60%"},
@@ -396,14 +435,14 @@ class NuScenesWriter(BaseWriter):
                 "level": vis["level"],
                 "description": vis["description"]
             })
-        out_path = os.path.join(self.annot_out_dir, 'visibility.json')
-        with json_file_lock:
-             with open(out_path, 'w') as f:
-                json.dump(new_entries, f, indent=2)
-        log.info(f"Overwrote {out_path} with {len(new_entries)} entries.")
+        
+        merge_and_overwrite_json_list(
+            os.path.join(self.annot_out_dir, 'visibility.json'),
+            new_entries,
+            key_field='level'
+        )
 
     def _write_attribute(self):
-        """Writes a static attribute.json file."""
         attributes = [
             {"name": "vehicle.moving", "description": "Vehicle is moving (default stub)"},
             {"name": "pedestrian.moving", "description": "Pedestrian is moving (default stub)"},
@@ -415,75 +454,61 @@ class NuScenesWriter(BaseWriter):
                 "name": attr["name"],
                 "description": attr["description"]
             })
-        out_path = os.path.join(self.annot_out_dir, 'attribute.json')
-        with json_file_lock:
-             with open(out_path, 'w') as f:
-                json.dump(new_entries, f, indent=2)
-        log.info(f"Overwote {out_path} with {len(new_entries)} entries.")
+        
+        merge_and_overwrite_json_list(
+            os.path.join(self.annot_out_dir, 'attribute.json'),
+            new_entries,
+            key_field='name'
+        )
 
     def _write_map(self):
-        """
-Signature:
-_write_map(self)
-Docstring:
-Writes a static map.json file.
-The user is responsible for adding the .png file to the maps folder.
-File:      ~/Desktop/IntermediateFormat/writers.py
-Type:      function
-"""
         location = "Hyderabad"
         map_filename = f"maps/{location.lower()}.png"
         map_token = self.token_manager.get_category_token(f"map_{location}")
         
+        # Link all logs generated so far
         new_map_entry = {
             "token": map_token,
-            "log_tokens": [], # We stub this as empty
+            "log_tokens": self.generated_log_tokens, # <-- FIXED
             "category": "semantic_prior",
             "filename": map_filename,
         }
         
-        # --- 1. Write the map.json file (OVERWRITE, not append) ---
-        out_path = os.path.join(self.annot_out_dir, 'map.json')
-        with json_file_lock:
-            try:
-                # We always overwrite map.json with a list containing this one map
-                with open(out_path, 'w') as f:
-                    json.dump([new_map_entry], f, indent=2)
-                log.info(f"Overwrote {out_path} with static map entry for {location}.")
-            except Exception as e:
-                log.error(f"FATAL: Could not write to map.json: {e}")
-                raise
+        merge_and_overwrite_json_list(
+            os.path.join(self.annot_out_dir, 'map.json'),
+            [new_map_entry],
+            key_field='token'
+        )
         
-        # --- 2. Notify user about map file ---
         log.info(f"User is responsible for adding '{location.lower()}.png' to the '{self.maps_out_dir}' directory.")
 
 
     def _write_log(self, scenes):
-        """
-        Creates and appends log.json entries for each scene.
-        """
         new_entries = []
         for if_scene in scenes:
-            # Use scene name to create a unique logfile entry
             logfile = f"{if_scene.name}-{datetime.now().strftime('%Y-%m-%d')}"
-            # Re-use category token logic to get a deterministic token
             log_token = self.token_manager.get_category_token(f"log_{logfile}") 
+            
+            # Add to list for map.json
+            self.generated_log_tokens.append(log_token) # <-- FIXED
             
             new_entries.append({
                 "token": log_token,
                 "logfile": logfile,
-                "vehicle": "stub_vehicle", # Stubbed
-                "date_captured": datetime.now().strftime('%Y-%m-%d'), # Stubbed
-                "location": "Hyderabad" # Stubbed
+                "vehicle": "stub_vehicle",
+                "date_captured": datetime.now().strftime('%Y-%m-%d'),
+                "location": "Hyderabad"
             })
-        append_to_json_list(os.path.join(self.annot_out_dir, 'log.json'), new_entries)
+        
+        # Logs can be appended, but merging is safer
+        merge_and_overwrite_json_list(
+            os.path.join(self.annot_out_dir, 'log.json'),
+            new_entries,
+            key_field='token'
+        )
 
     def _write_file_manifest(self, data: IntermediateData):
-        """
-        Creates a manifest of source-to-output file paths for traceability.
-        """
         new_entries = []
-        
         frame_to_sensor_data = {}
         for sd in data.sensor_data:
             if sd.temp_frame_id not in frame_to_sensor_data:
@@ -493,99 +518,75 @@ Type:      function
         for if_sample in data.samples:
             frame_id = if_sample.temp_frame_id
             sequence_name = if_sample.scene_name
-            
             manifest_entry = {
                 "frame_id": frame_id,
                 "sequence": sequence_name,
                 "sample_token": self.token_manager.get_frame_token(frame_id),
                 "sensors": []
             }
-
-            if frame_id not in frame_to_sensor_data:
-                continue
-
+            if frame_id not in frame_to_sensor_data: continue
             for sd in frame_to_sensor_data[frame_id]:
                 timestamp = sd.timestamp_us
                 output_filename_base = f"{sequence_name}_frame_{timestamp}"
-
                 if sd.sensor_name.startswith("CAM_"):
                     output_filename = f"{output_filename_base}.jpg"
                     source_file = f"{sequence_name}/camera/{sd.original_filename}"
                 else: # LIDAR_TOP
                     output_filename = f"{output_filename_base}.pcd.bin"
                     source_file = f"{sequence_name}/lidar/{sd.original_filename}"
-
                 manifest_entry["sensors"].append({
                     "channel": sd.sensor_name,
                     "source_file": source_file,
                     "output_file": f"samples/{sd.sensor_name}/{output_filename}"
                 })
-            
             new_entries.append(manifest_entry)
             
+        # Manifest can be safely appended
         append_to_json_list(os.path.join(self.annot_out_dir, 'file_manifest.json'), new_entries)
 
 
     # --- File Processing Methods (called by write()) ---
     
     def _process_sensor_files(self, sensor_data, sequence_path, sequence_name):
-        """
-        Loops through sensor data, finds original files,
-        converts, and saves them using the timestamped naming convention.
-        """
         num_lidar = 0
         num_camera = 0
         
         for sd in sensor_data:
             timestamp = sd.timestamp_us
-            
-            # --- NEW FILENAME LOGIC ---
-            # Format: {sequence_name}_frame_{timestamp}
             output_filename_base = f"{sequence_name}_frame_{timestamp}"
             
             if sd.sensor_name == "LIDAR_TOP":
-                # 1. Find Source Path
                 src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
-                
-                # 2. Define Destination Path
-                output_filename = f"{output_filename_base}.pcd.bin" # <-- Correct name
+                output_filename = f"{output_filename_base}.pcd.bin"
                 dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
                 
-                # 3. Convert
-                convert_lidar_file(src_file, dst_file)
-                num_lidar += 1
+                # Only convert if it doesn't already exist
+                if not os.path.exists(dst_file):
+                    convert_lidar_file(src_file, dst_file)
+                    num_lidar += 1
             
             else: # It's a camera
-                # 1. Find Source Path
-                # 'original_filename' is e.g., "cam0/00000.png"
                 src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
-                
-                # 2. Define Destination Path
-                output_filename = f"{output_filename_base}.jpg" # <-- Correct name
+                output_filename = f"{output_filename_base}.jpg"
                 dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
                 
-                # 3. Convert
-                convert_camera_file(src_file, dst_file)
-                num_camera += 1
+                # Only convert if it doesn't already exist
+                if not os.path.exists(dst_file):
+                    convert_camera_file(src_file, dst_file)
+                    num_camera += 1
                 
-        log.info(f"Processed {num_lidar} LiDAR files and {num_camera} camera files.")
+        log.info(f"Processed {num_lidar} new LiDAR files and {num_camera} new camera files.")
 
     def _duplicate_sweeps(self):
-        """
-        Deletes old 'sweeps' dir and copies 'samples' to it.
-        """
         if os.path.exists(self.sweeps_out_dir):
-            try:
-                shutil.rmtree(self.sweeps_out_dir)
-                log.info(f"Removed old 'sweeps' directory.")
+            try: shutil.rmtree(self.sweeps_out_dir)
             except Exception as e:
                 log.error(f"Could not remove 'sweeps' directory: {e}")
-                return # Stop if we can't remove it
-
+                return
         try:
             shutil.copytree(self.samples_out_dir, self.sweeps_out_dir)
             log.info(f"Successfully duplicated 'samples' to 'sweeps'.")

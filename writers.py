@@ -9,11 +9,29 @@ import os
 import json
 import shutil
 import logging
+import uuid  # <-- ADDED FOR MAP EXPANSION
 from abc import ABC, abstractmethod
 from PIL import Image
 from datetime import datetime
 from intermediate_format import IntermediateData
 from utils import TokenTimestampManager, append_to_json_list, json_file_lock, merge_and_overwrite_json_list
+
+# --- MODIFIED: Added pyarrow and pandas ---
+try:
+    import numpy as np
+    import pyarrow.feather as pf
+    import pandas as pd
+except ImportError:
+    print("WARNING: numpy, pyarrow or pandas not found. Argoverse LiDAR conversion will fail.")
+    print("Please run: pip install numpy pyarrow pandas")
+
+try:
+    import open3d as o3d
+except ImportError:
+    print("WARNING: open3d not found. IDD3D .pcd conversion will fail.")
+    print("Please run: pip install open3d")
+# --- END MODIFIED ---
+
 
 # Configure basic logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -26,8 +44,6 @@ def convert_lidar_file(src_path, dst_path):
     If open3d is not available, creates an empty placeholder file.
     """
     try:
-        import numpy as np
-        import open3d as o3d
         if not os.path.exists(src_path):
             log.warning(f"Source LiDAR file not found: {src_path}")
             open(dst_path, 'wb').close(); return
@@ -36,16 +52,13 @@ def convert_lidar_file(src_path, dst_path):
         intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
         pts = np.hstack((xyz, intensity))
         pts.astype(np.float32).tofile(dst_path)
-    except ImportError:
-        log.warning(f"open3d not available. Creating empty placeholder for {dst_path}")
-        open(dst_path, 'wb').close()
     except Exception as e:
-        log.error(f"Error converting {src_path}: {e}. Creating empty file.")
+        log.error(f"Error converting {src_path} (is open3d installed?): {e}. Creating empty file.")
         open(dst_path, 'wb').close()
 
 def convert_camera_file(src_path, dst_path):
     """
-    Converts a .png file to a .jpg file.
+    Converts a .png or .jpg file to a .jpg file.
     If PIL is not available, does nothing.
     """
     try:
@@ -60,6 +73,30 @@ def convert_camera_file(src_path, dst_path):
         log.warning(f"PIL/Pillow not available. Skipping camera conversion for {src_path}")
     except Exception as e:
         log.error(f"Error converting {src_path} to {dst_path}: {e}")
+
+# --- NEW HELPER FUNCTION FOR ARGOVERSE ---
+def convert_feather_to_pcd_bin(src_path, dst_path):
+    """
+    Converts Argoverse .feather LiDAR file to .pcd.bin format.
+    """
+    try:
+        if not os.path.exists(src_path):
+            log.warning(f"Source LiDAR file not found: {src_path}")
+            open(dst_path, 'wb').close(); return
+        
+        table = pf.read_feather(src_path)
+        df = table.to_pandas() # Columns: 'x', 'y', 'z', 'intensity', ...
+        
+        # We only need x, y, z, and intensity for nuScenes format
+        # Note: nuScenes is [x, y, z, intensity]
+        pts = df[['x', 'y', 'z', 'intensity']].values.astype(np.float32)
+        
+        pts.astype(np.float32).tofile(dst_path)
+        
+    except Exception as e:
+        log.error(f"Error converting {src_path} (is pyarrow/pandas installed?): {e}. Creating empty file.")
+        open(dst_path, 'wb').close()
+# --- END NEW ---
 
 # -----------------------------------------------------------------------------
 #  BASE WRITER
@@ -85,8 +122,12 @@ class NuScenesWriter(BaseWriter):
         self.samples_out_dir = None
         self.sweeps_out_dir = None
         self.maps_out_dir = None
+        self.map_expansion_dir = None # <-- ADDED
+        self.map_expansion_basemap_dir = None # <-- ADDED
+        self.map_expansion_expansion_dir = None # <-- ADDED
+        self.map_expansion_prediction_dir = None # <-- ADDED
         
-        # --- NEW: Holders for cross-run data ---
+        # --- Holders for cross-run data ---
         self.generated_log_tokens = []
         self.all_sample_annotations = []
         self.instance_db = {} # Holds all instance data
@@ -105,6 +146,17 @@ class NuScenesWriter(BaseWriter):
         os.makedirs(self.samples_out_dir, exist_ok=True)
         os.makedirs(self.maps_out_dir, exist_ok=True)
 
+        # --- NEW: Create Map Expansion Dirs ---
+        self.map_expansion_dir = os.path.join(self.output_path, 'idd3d_map_expansion')
+        self.map_expansion_basemap_dir = os.path.join(self.map_expansion_dir, 'basemap')
+        self.map_expansion_expansion_dir = os.path.join(self.map_expansion_dir, 'expansion')
+        self.map_expansion_prediction_dir = os.path.join(self.map_expansion_dir, 'prediction')
+
+        os.makedirs(self.map_expansion_basemap_dir, exist_ok=True)
+        os.makedirs(self.map_expansion_expansion_dir, exist_ok=True)
+        os.makedirs(self.map_expansion_prediction_dir, exist_ok=True)
+        # --- END NEW ---
+
         # --- 2. Initialize TokenManager ---
         registry_path = os.path.join(self.annot_out_dir, 'token_registry.json')
         last_timestamp = self._get_last_timestamp()
@@ -115,9 +167,7 @@ class NuScenesWriter(BaseWriter):
             base_timestamp=new_base_timestamp
         )
 
-        # --- NEW: Pre-populate TokenManager with user's categories ---
         self._pre_populate_categories()
-        # --- END NEW ---
 
         if not data.scenes:
             log.error("No scenes found in intermediate data. Cannot proceed."); return
@@ -127,22 +177,19 @@ class NuScenesWriter(BaseWriter):
         # --- 3. Run Writing Tasks in Order ---
         log.info("Writing JSON metadata files...")
         
-        # --- Dictionary Files (Merge & Overwrite) ---
         self._write_sensor_and_calib(data.calibrations)
         self._write_visibility()
         self._write_attribute()
         
-        # --- Log Files (Append) ---
         self._write_log(data.scenes)
-        self._write_map() # Must be after _write_log
-        self._write_file_manifest(data) # Can be appended
+        self._write_map() # Creates hyderabad.png
+        self._write_map_expansion() # <-- ADDED: Creates hyderabad.json and copies png
+        self._write_file_manifest(data) 
 
-        # --- Linked-List Files (Read, Merge, Re-link, Overwrite) ---
         self._write_sample_and_ego_pose(data.samples, data.ego_poses)
         self._write_sample_data(data.sensor_data, sequence_name)
         
-        # --- Annotation & Instance (Most complex linking) ---
-        self._write_category(data.instances) # Must be before instance/ann
+        self._write_category(data.instances)
         self._write_instance_and_annotation(data.instances, data.annotations)
         
         # --- 4. Process Physical Files ---
@@ -175,7 +222,6 @@ class NuScenesWriter(BaseWriter):
         if last_timestamp: log.info(f"Found existing data. Last timestamp: {last_timestamp}")
         return last_timestamp
 
-    # --- NEW METHOD to pre-load categories ---
     def _pre_populate_categories(self):
         """
         Manually injects the user's official category tokens
@@ -183,7 +229,6 @@ class NuScenesWriter(BaseWriter):
         """
         log.info("Pre-populating TokenManager with official category tokens...")
         
-        # This is the content from the user's category2.json file
         official_categories = [
           {
             "token": "dc39d8b2858e4bc0b7ddf66ede8d734e",
@@ -261,8 +306,6 @@ class NuScenesWriter(BaseWriter):
         for category in official_categories:
             cat_name = category['name']
             cat_token = category['token']
-            # This check is crucial: only add if NOT in registry
-            # --- FIXED: Only add to category_tokens ---
             if cat_name not in self.token_manager.category_tokens:
                 self.token_manager.category_tokens[cat_name] = cat_token
                 count += 1
@@ -294,7 +337,6 @@ class NuScenesWriter(BaseWriter):
                 "camera_intrinsic": if_calib.camera_intrinsic
             })
         
-        # Use merge_and_overwrite to prevent duplicates
         merge_and_overwrite_json_list(
             os.path.join(self.annot_out_dir, 'sensor.json'), 
             new_sensors, 
@@ -307,7 +349,6 @@ class NuScenesWriter(BaseWriter):
         )
 
     def _write_sample_and_ego_pose(self, samples, ego_poses):
-        # --- Read Existing Data ---
         sample_path = os.path.join(self.annot_out_dir, 'sample.json')
         ego_pose_path = os.path.join(self.annot_out_dir, 'ego_pose.json')
         
@@ -322,12 +363,11 @@ class NuScenesWriter(BaseWriter):
                 try: all_ego_poses = json.load(open(ego_pose_path, 'r'))
                 except: log.warning("ego_pose.json corrupted. Overwriting.")
         
-        # --- Add New Data ---
         for if_sample in samples:
             all_samples.append({
                 "token": self.token_manager.get_frame_token(if_sample.temp_frame_id),
                 "timestamp": if_sample.timestamp_us,
-                "scene_token": self.token_manager.get_scene_token() # Assumes one scene per run
+                "scene_token": self.token_manager.get_scene_token() 
             })
         
         for if_pose in ego_poses:
@@ -338,7 +378,6 @@ class NuScenesWriter(BaseWriter):
                 "rotation": if_pose.rotation
             })
 
-        # --- Sort and Re-link ---
         all_samples.sort(key=lambda x: x['timestamp'])
         all_ego_poses.sort(key=lambda x: x['timestamp'])
         
@@ -352,14 +391,12 @@ class NuScenesWriter(BaseWriter):
                 sample['next'] = scene_samples[i+1]['token'] if i < len(scene_samples) - 1 else ""
             final_samples.extend(scene_samples)
         
-        # --- Overwrite Files ---
         with json_file_lock:
             json.dump(final_samples, open(sample_path, 'w'), indent=2)
             log.info(f"Merged and overwrote sample.json. Total items: {len(final_samples)}")
             json.dump(all_ego_poses, open(ego_pose_path, 'w'), indent=2)
             log.info(f"Merged and overwrote ego_pose.json. Total items: {len(all_ego_poses)}")
         
-        # --- Add Scene (Append is OK here) ---
         if samples:
             new_scene = {
                 "token": self.token_manager.get_scene_token(),
@@ -392,8 +429,12 @@ class NuScenesWriter(BaseWriter):
                 output_filename = f"{output_filename_base}.jpg"
                 fileformat = "jpg"
             else:
-                output_filename = f"{output_filename_base}.pcd.bin"
-                fileformat = "pcd.bin"
+                if if_data.original_filename.endswith(".feather"):
+                    output_filename = f"{output_filename_base}.pcd.bin"
+                    fileformat = "pcd.bin"
+                else: 
+                    output_filename = f"{output_filename_base}.pcd.bin"
+                    fileformat = "pcd.bin"
 
             all_sample_data.append({
                 "token": sd_token,
@@ -408,7 +449,6 @@ class NuScenesWriter(BaseWriter):
                 "is_key_frame": if_data.is_keyframe,
             })
         
-        # --- Group, Sort, and Re-link ---
         sensor_groups = {}
         for sd in all_sample_data:
             token = sd['calibrated_sensor_token']
@@ -427,21 +467,10 @@ class NuScenesWriter(BaseWriter):
             json.dump(final_sample_data, open(sample_data_path, 'w'), indent=2)
             log.info(f"Merged and overwrote sample_data.json. Total items: {len(final_sample_data)}")
 
-
-    # --- MODIFIED METHOD ---
     def _write_category(self, instances):
-        """
-        Writes the category.json file.
-        Dumps all known categories from the TokenManager (which is pre-populated)
-        and any new categories found in the current dataset.
-        """
         new_categories = []
-        
-        # Get all unique category names from the current instances
         all_category_names_from_data = {inst.category_name for inst in instances}
         
-        # Add all pre-populated categories from the manager
-        # (This now ONLY contains real categories)
         for name, token in self.token_manager.category_tokens.items():
             new_categories.append({
                 "token": token,
@@ -449,29 +478,25 @@ class NuScenesWriter(BaseWriter):
                 "description": f"{name} category"
             })
         
-        # Add any *new* categories from the data that weren't pre-populated
-        # (This will be empty for IDD3D, but useful for Argoverse)
         for name in all_category_names_from_data:
             if name not in self.token_manager.category_tokens:
-                token = self.token_manager.get_category_token(name) # This will create a new one
+                token = self.token_manager.get_category_token(name)
                 new_categories.append({
                     "token": token,
                     "name": name,
                     "description": f"{name} category"
                 })
 
-        # This will merge the pre-populated categories and any new ones
         merge_and_overwrite_json_list(
             os.path.join(self.annot_out_dir, 'category.json'), 
             new_categories, 
-            key_field='name' # Use name as the unique key
+            key_field='name' 
         )
 
     def _write_instance_and_annotation(self, instances, annotations):
         instance_path = os.path.join(self.annot_out_dir, 'instance.json')
         ann_path = os.path.join(self.annot_out_dir, 'sample_annotation.json')
 
-        # --- Read Existing Data ---
         with json_file_lock:
             try:
                 all_anns = json.load(open(ann_path, 'r')) if os.path.exists(ann_path) else []
@@ -479,11 +504,10 @@ class NuScenesWriter(BaseWriter):
             
             try:
                 inst_list = json.load(open(instance_path, 'r')) if os.path.exists(instance_path) else []
-                inst_db = {i['token']: i for i in inst_list} # key by token
+                inst_db = {i['token']: i for i in inst_list}
             except: inst_db = {}; log.warning("instance.json corrupted.")
 
-        # --- Process New Data ---
-        new_anns_by_inst_id = {} # key by temp_instance_id
+        new_anns_by_inst_id = {}
         for ann in annotations:
             if ann.temp_instance_id not in new_anns_by_inst_id:
                 new_anns_by_inst_id[ann.temp_instance_id] = []
@@ -491,17 +515,12 @@ class NuScenesWriter(BaseWriter):
 
         inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
         
-        # --- NEW: Keep track of which categories we've actually used ---
         used_category_tokens = set()
 
         for temp_inst_id, new_anns_list in new_anns_by_inst_id.items():
-            # This call is now safe: it gets the official token
             inst_token = self.token_manager.get_instance_token(temp_inst_id)
-            
-            # Sort new annotations
             new_anns_list.sort(key=lambda x: x.timestamp_us)
             
-            # Find link to existing data
             last_ann_token_from_existing = ""
             if inst_token in inst_db:
                 last_ann_token_from_existing = inst_db[inst_token]['last_annotation_token']
@@ -512,10 +531,8 @@ class NuScenesWriter(BaseWriter):
                 category_name = inst_name_map.get(temp_inst_id, "")
                 attribute_tokens = []
                 if category_name.startswith('vehicle.'):
-                    # --- FIXED: Use get_attribute_token ---
                     attribute_tokens = [self.token_manager.get_attribute_token("vehicle.moving")]
                 elif category_name.startswith('human.'):
-                     # --- FIXED: Use get_attribute_token ---
                     attribute_tokens = [self.token_manager.get_attribute_token("pedestrian.moving")]
 
                 ann_token = generated_tokens[i]
@@ -527,7 +544,6 @@ class NuScenesWriter(BaseWriter):
                     "sample_token": self.token_manager.get_frame_token(if_ann.temp_frame_id),
                     "instance_token": inst_token,
                     "attribute_tokens": attribute_tokens,
-                    # --- FIXED: Use get_visibility_token ---
                     "visibility_token": self.token_manager.get_visibility_token("v4-0"),
                     "translation": if_ann.translation,
                     "size": if_ann.size,
@@ -536,8 +552,6 @@ class NuScenesWriter(BaseWriter):
                     "num_lidar_pts": 0, "num_radar_pts": 0
                 })
 
-            # --- Create / Update Instance DB Entry ---
-            # --- FIXED: Get the real category token and add to used set ---
             category_token = self.token_manager.get_category_token(inst_name_map.get(temp_inst_id, ""))
             used_category_tokens.add(category_token)
 
@@ -553,23 +567,18 @@ class NuScenesWriter(BaseWriter):
                 inst_db[inst_token]["nbr_annotations"] += len(generated_tokens)
                 inst_db[inst_token]["last_annotation_token"] = generated_tokens[-1]
         
-        # --- NEW: Create dummy instances for unused categories ---
         log.info("Checking for unused categories to create dummy instances...")
         dummy_instance_count = 0
-        # Iterate through all *official* categories in the manager
+        
         for cat_name, cat_token in self.token_manager.category_tokens.items():
             if cat_token not in used_category_tokens:
-                # This category was in category.json but not in instance.json
-                # We must create a dummy instance for it.
-                # --- FIXED: Use a clean, deterministic, random-looking token ---
                 dummy_instance_token = self.token_manager.get_instance_token(f"dummy_instance_for_{cat_name}")
                 
-                if dummy_instance_token not in inst_db: # Only add if it doesn't exist
+                if dummy_instance_token not in inst_db: 
                     inst_db[dummy_instance_token] = {
                         "token": dummy_instance_token,
                         "category_token": cat_token,
                         "nbr_annotations": 0,
-                        # --- FINAL FIX: Fill with dummy token ---
                         "first_annotation_token": dummy_instance_token,
                         "last_annotation_token": dummy_instance_token
                     }
@@ -578,7 +587,6 @@ class NuScenesWriter(BaseWriter):
         if dummy_instance_count > 0:
             log.info(f"Created {dummy_instance_count} dummy instances to satisfy devkit (for unused categories).")
 
-        # --- Overwrite Files ---
         with json_file_lock:
             json.dump(list(inst_db.values()), open(instance_path, 'w'), indent=2)
             log.info(f"Merged and overwrote instance.json. Total items: {len(inst_db)}")
@@ -596,7 +604,6 @@ class NuScenesWriter(BaseWriter):
         new_entries = []
         for vis in vis_levels:
             new_entries.append({
-                 # --- FIXED: Use get_visibility_token ---
                 "token": self.token_manager.get_visibility_token(vis["level"]),
                 "level": vis["level"],
                 "description": vis["description"]
@@ -616,7 +623,6 @@ class NuScenesWriter(BaseWriter):
         new_entries = []
         for attr in attributes:
             new_entries.append({
-                 # --- FIXED: Use get_attribute_token ---
                 "token": self.token_manager.get_attribute_token(attr["name"]),
                 "name": attr["name"],
                 "description": attr["description"]
@@ -631,13 +637,11 @@ class NuScenesWriter(BaseWriter):
     def _write_map(self):
         location = "Hyderabad"
         map_filename = f"maps/{location.lower()}.png"
-         # --- FIXED: Use get_map_token ---
         map_token = self.token_manager.get_map_token(f"map_{location}")
         
-        # Link all logs generated so far
         new_map_entry = {
             "token": map_token,
-            "log_tokens": self.generated_log_tokens, # This is now correct
+            "log_tokens": self.generated_log_tokens, 
             "category": "semantic_prior",
             "filename": map_filename,
         }
@@ -648,17 +652,32 @@ class NuScenesWriter(BaseWriter):
             key_field='token'
         )
         
-        log.info(f"User is responsible for adding '{location.lower()}.png' to the '{self.maps_out_dir}' directory.")
+        # --- Create the main map image ---
+        image_path = os.path.join(self.maps_out_dir, f"{location.lower()}.png")
+        if not os.path.exists(image_path):
+            try:
+                img = Image.new('RGB', (10, 10), color='black')
+                img.save(image_path, 'PNG')
+                log.info(f"Created dummy map file: {image_path}")
+            except Exception as e:
+                log.error(f"Could not create dummy map image: {e}")
+
+        # --- NEW: Copy this png to the map_expansion/basemap folder ---
+        basemap_image_path = os.path.join(self.map_expansion_basemap_dir, f"{location.lower()}.png")
+        if not os.path.exists(basemap_image_path):
+            try:
+                shutil.copyfile(image_path, basemap_image_path)
+                log.info(f"Copied map basemap to: {basemap_image_path}")
+            except Exception as e:
+                log.error(f"Could not copy basemap image: {e}")
 
 
     def _write_log(self, scenes):
         new_entries = []
         for if_scene in scenes:
             logfile = f"{if_scene.name}-{datetime.now().strftime('%Y-%m-%d')}"
-             # --- FIXED: Use get_log_token ---
             log_token = self.token_manager.get_log_token(f"log_{logfile}") 
             
-            # Add to list for map.json
             self.generated_log_tokens.append(log_token)
             
             new_entries.append({
@@ -699,9 +718,13 @@ class NuScenesWriter(BaseWriter):
                 if sd.sensor_name.startswith("CAM_"):
                     output_filename = f"{output_filename_base}.jpg"
                     source_file = f"{sequence_name}/camera/{sd.original_filename}"
-                else: # LIDAR_TOP
+                else: # LIDAR
                     output_filename = f"{output_filename_base}.pcd.bin"
-                    source_file = f"{sequence_name}/lidar/{sd.original_filename}"
+                    if sd.original_filename.endswith('.feather'):
+                         source_file = f"{sequence_name}/lidar/{sd.original_filename}"
+                    else: 
+                         source_file = f"{sequence_name}/lidar/{sd.original_filename}"
+
                 manifest_entry["sensors"].append({
                     "channel": sd.sensor_name,
                     "source_file": source_file,
@@ -709,9 +732,71 @@ class NuScenesWriter(BaseWriter):
                 })
             new_entries.append(manifest_entry)
             
-        # Manifest can be safely appended
         append_to_json_list(os.path.join(self.annot_out_dir, 'file_manifest.json'), new_entries)
 
+    # --- NEW: Map Expansion Stub Method ---
+    def _write_map_expansion(self):
+        """
+        Creates a stubbed hyderabad.json map expansion file.
+        """
+        log.info("Creating stubbed map expansion file...")
+        expansion_path = os.path.join(self.map_expansion_expansion_dir, "hyderabad.json")
+
+        # Generate tokens
+        poly_token = uuid.uuid4().hex
+        node1_token = uuid.uuid4().hex
+        node2_token = uuid.uuid4().hex
+        node3_token = uuid.uuid4().hex
+        node4_token = uuid.uuid4().hex
+        lane1_token = uuid.uuid4().hex
+        edge1_token = uuid.uuid4().hex
+        edge2_token = uuid.uuid4().hex
+
+        stub_data = {
+            "version": "1.3",
+            "polygon": [
+                {
+                    "token": poly_token,
+                    "exterior_node_token": [node1_token, node2_token, node3_token, node4_token],
+                    "holes": []
+                }
+            ],
+            "node": [
+                {"token": node1_token, "x": 10.0, "y": 10.0},
+                {"token": node2_token, "x": 10.0, "y": -10.0},
+                {"token": node3_token, "x": -10.0, "y": -10.0},
+                {"token": node4_token, "x": -10.0, "y": 10.0}
+            ],
+            "lane": [
+                {
+                    "token": lane1_token,
+                    "polygon_token": poly_token,
+                    "lane_type": "car",
+                    "from_edge_line_token": edge1_token,
+                    "to_edge_line_token": edge2_token,
+                    "left_lane_divider_segment": [],
+                    "right_lane_divider_segment": [
+                        {
+                            "node_token": edge1_token,
+                            "segment_type": "DOUBLE-DASHED_WHITE"
+                        },
+                        {
+                            "node_token": edge2_token,
+                            "segment_type": "DOUBLE-DASHED_WHITE"
+                        }
+                    ]
+                }
+            ]
+        }
+
+        try:
+            # This file is a static stub, so we just overwrite it
+            with open(expansion_path, 'w') as f:
+                json.dump(stub_data, f, indent=2)
+            log.info(f"Created stub map expansion file at: {expansion_path}")
+        except Exception as e:
+            log.error(f"FATAL: Could not write map expansion file: {e}")
+            raise
 
     # --- File Processing Methods (called by write()) ---
     
@@ -723,26 +808,37 @@ class NuScenesWriter(BaseWriter):
             timestamp = sd.timestamp_us
             output_filename_base = f"{sequence_name}_frame_{timestamp}"
             
-            if sd.sensor_name == "LIDAR_TOP":
+            # --- MODIFIED: Handle .pcd, .feather, and images ---
+            if sd.original_filename.endswith('.pcd'):
                 src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
                 output_filename = f"{output_filename_base}.pcd.bin"
                 dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
                 
-                # Only convert if it doesn't already exist
                 if not os.path.exists(dst_file):
                     convert_lidar_file(src_file, dst_file)
                     num_lidar += 1
             
+            elif sd.original_filename.endswith('.feather'):
+                src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
+                output_filename = f"{output_filename_base}.pcd.bin"
+                dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
+                os.makedirs(dst_folder, exist_ok=True)
+                dst_file = os.path.join(dst_folder, output_filename)
+                
+                if not os.path.exists(dst_file):
+                    convert_feather_to_pcd_bin(src_file, dst_file) # <-- Use new helper
+                    num_lidar += 1
+            
             else: # It's a camera
+                # Source filename can be "cam0/00000.png" (IDD3D) or "ring_front_center/1234.jpg" (AV2)
                 src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
                 output_filename = f"{output_filename_base}.jpg"
                 dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
                 
-                # Only convert if it doesn't already exist
                 if not os.path.exists(dst_file):
                     convert_camera_file(src_file, dst_file)
                     num_camera += 1

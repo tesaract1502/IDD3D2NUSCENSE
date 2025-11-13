@@ -9,7 +9,7 @@ import os
 import json
 import shutil
 import logging
-import uuid  # <-- ADDED FOR MAP EXPANSION
+import uuid  # <-- Used for map expansion and prediction
 from abc import ABC, abstractmethod
 from PIL import Image
 from datetime import datetime
@@ -122,10 +122,10 @@ class NuScenesWriter(BaseWriter):
         self.samples_out_dir = None
         self.sweeps_out_dir = None
         self.maps_out_dir = None
-        self.map_expansion_dir = None # <-- ADDED
-        self.map_expansion_basemap_dir = None # <-- ADDED
-        self.map_expansion_expansion_dir = None # <-- ADDED
-        self.map_expansion_prediction_dir = None # <-- ADDED
+        self.map_expansion_dir = None 
+        self.map_expansion_basemap_dir = None 
+        self.map_expansion_expansion_dir = None 
+        self.map_expansion_prediction_dir = None 
         
         # --- Holders for cross-run data ---
         self.generated_log_tokens = []
@@ -183,7 +183,8 @@ class NuScenesWriter(BaseWriter):
         
         self._write_log(data.scenes)
         self._write_map() # Creates hyderabad.png
-        self._write_map_expansion() # <-- ADDED: Creates hyderabad.json and copies png
+        self._write_map_expansion() 
+        self._write_prediction(data.scenes, data.samples) # <-- ADDED
         self._write_file_manifest(data) 
 
         self._write_sample_and_ego_pose(data.samples, data.ego_poses)
@@ -516,6 +517,9 @@ class NuScenesWriter(BaseWriter):
         inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
         
         used_category_tokens = set()
+        # --- NEW: Get category tokens that already have instances ---
+        for inst in inst_db.values():
+            used_category_tokens.add(inst['category_token'])
 
         for temp_inst_id, new_anns_list in new_anns_by_inst_id.items():
             inst_token = self.token_manager.get_instance_token(temp_inst_id)
@@ -797,6 +801,55 @@ class NuScenesWriter(BaseWriter):
         except Exception as e:
             log.error(f"FATAL: Could not write map expansion file: {e}")
             raise
+            
+    # --- NEW: Prediction Stub Method ---
+    def _write_prediction(self, scenes, samples):
+        """
+        Creates a stubbed prediction.json file, merging scene entries.
+        """
+        if not scenes or not samples:
+            log.warning("No scenes or samples found, skipping prediction.json.")
+            return
+
+        prediction_path = os.path.join(self.map_expansion_prediction_dir, "prediction.json")
+        
+        # Load existing prediction data
+        prediction_data = {}
+        with json_file_lock:
+            if os.path.exists(prediction_path):
+                try:
+                    with open(prediction_path, 'r') as f:
+                        prediction_data = json.load(f)
+                    if not isinstance(prediction_data, dict):
+                        log.warning("prediction.json is not a dictionary. Overwriting.")
+                        prediction_data = {}
+                except json.JSONDecodeError:
+                    log.warning("prediction.json is corrupted. Overwriting.")
+                    prediction_data = {}
+            
+            # --- Create new entry for this scene ---
+            scene_name = scenes[0].name
+            
+            # Find the first sample for this scene
+            first_sample = min(samples, key=lambda x: x.timestamp_us)
+            first_sample_token = self.token_manager.get_frame_token(first_sample.temp_frame_id)
+            
+            # Create one stubbed prediction string
+            prediction_id = uuid.uuid4().hex
+            prediction_string = f"{prediction_id}_{first_sample_token}"
+            
+            # Add to the dictionary
+            prediction_data[scene_name] = [prediction_string]
+            
+            # Write the updated dictionary back to the file
+            try:
+                with open(prediction_path, 'w') as f:
+                    json.dump(prediction_data, f, indent=2)
+                log.info(f"Merged scene '{scene_name}' into prediction.json.")
+            except Exception as e:
+                log.error(f"FATAL: Could not write prediction.json: {e}")
+                raise
+
 
     # --- File Processing Methods (called by write()) ---
     

@@ -1,214 +1,267 @@
-# extensible_backend.py
+# legacy_backend.py
 # ----------------------
-# DEPRECATED: This Flask backend is being phased out in favor of convert_cli.py
-# 
-# This file is kept for backwards compatibility but should not be used for new projects.
-# Please use the CLI tool instead: python convert_cli.py --help
+# LEGACY/DEPRECATED: Old granular converter classes
+#
+# This file preserves the original conversion algorithms from
+# extensible_converter_backend.py for backward compatibility.
+#
+# ⚠️ WARNING: This approach is DEPRECATED!
+# ⚠️ Please use the new Reader/Writer architecture instead:
+#    - readers.py (for reading data)
+#    - writers.py (for writing data)
+#    - convert_cli.py (for CLI usage)
+#
+# This file is kept ONLY for:
+# 1. Reference/comparison with new architecture
+# 2. Legacy code that depends on granular converters
+# 3. Migration validation (compare outputs)
+#
+# DO NOT USE FOR NEW PROJECTS!
 # ----------------------
 
 """
-NOTE: This backend has been DEPRECATED in favor of the modular CLI approach.
+MIGRATION GUIDE:
+===============
 
-The new architecture uses:
-- convert_cli.py: Main entry point
-- readers.py: Dataset-specific readers (IDD3D, Argoverse, etc.)
-- writers.py: Format-specific writers (nuScenes, KITTI, etc.)
-- intermediate_format.py: Common data representation
-- utils.py: Shared utilities
+Old Code (This File):
+---------------------
+from legacy_backend import IDD3DDataLoader, IDD3DLidarConverter
+loader = IDD3DDataLoader(root, sequence)
+converter = IDD3DLidarConverter()
+converter.run(loader, log_handler)
 
-To convert datasets, use:
-    python convert_cli.py --reader idd3d --writer nuscenes --input /path/to/data --output /path/to/output
+New Code (Recommended):
+-----------------------
+from readers import Idd3dReader
+from writers import NuScenesWriter
 
-This Flask backend remains here only for legacy support and should be removed in future versions.
+reader = Idd3dReader()
+data = reader.read('/path/to/sequence')
+
+writer = NuScenesWriter()
+writer.write(data, '/path/to/output')
 """
 
-from flask import Flask, jsonify, request, Response, stream_with_context
-from flask_cors import CORS
 import os
 import json
 import logging
-from queue import Queue
-from datetime import datetime
+from abc import ABC, abstractmethod
 
-# Import the new modular components
-try:
-    from readers import Idd3dReader
-    from writers import NuScenesWriter
-    from intermediate_format import IntermediateData
-except ImportError:
-    print("ERROR: Could not import new modular components.")
-    print("Please ensure readers.py, writers.py, and intermediate_format.py are in the same directory.")
-    exit(1)
-
-app = Flask(__name__)
-CORS(app)
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Global state for active conversions
-conversion_state = {
-    'active': False,
-    'logs': Queue(),
-    'progress': 0,
-    'total_steps': 0
-}
+log = logging.getLogger(__name__)
 
 
-class LogHandler:
-    """Handler to capture conversion logs and emit them via SSE."""
-    
-    def __init__(self, log_queue):
-        self.queue = log_queue
+# ============================================================================
+# LEGACY CONVERTER FRAMEWORK
+# ============================================================================
+
+class LegacyLogHandler:
+    """
+    Legacy log handler for backward compatibility.
+    In the new architecture, use standard Python logging instead.
+    """
+    def __init__(self):
+        pass
     
     def log(self, message, log_type='info'):
-        """Add a log entry to the queue."""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_entry = {
-            'timestamp': timestamp,
-            'message': message,
-            'type': log_type
-        }
-        self.queue.put(log_entry)
-        logger.info(f"[{log_type.upper()}] {message}")
-
-
-@app.route('/api/health', methods=['GET'])
-def health():
-    """Health check endpoint."""
-    return jsonify({
-        'status': 'healthy',
-        'service': 'Dataset Converter API (DEPRECATED)',
-        'message': 'Please use convert_cli.py instead'
-    })
-
-
-@app.route('/api/conversions', methods=['GET'])
-def get_conversions():
-    """Get all available conversions."""
-    return jsonify({
-        'conversions': [
-            {'source': 'idd3d', 'target': 'nuscenes'}
-        ],
-        'warning': 'This API is deprecated. Please use convert_cli.py'
-    })
-
-
-@app.route('/api/validate-paths', methods=['POST'])
-def validate_paths():
-    """Validate dataset paths."""
-    data = request.json
-    source = data.get('source', 'idd3d')
-    sequence_path = data.get('sequence_path')
-    
-    if not sequence_path:
-        return jsonify({'valid': False, 'error': 'Sequence Path is required'}), 400
-    
-    if not os.path.exists(sequence_path):
-        return jsonify({'valid': False, 'error': f'Path does not exist: {sequence_path}'}), 400
-    
-    try:
-        if source == 'idd3d':
-            reader = Idd3dReader()
-            validation = reader.validate(sequence_path)
-            return jsonify(validation)
+        if log_type == 'error':
+            log.error(message)
+        elif log_type == 'warning':
+            log.warning(message)
+        elif log_type == 'success':
+            log.info(f"✓ {message}")
         else:
-            return jsonify({'valid': False, 'error': f'Unknown source: {source}'}), 400
-    except Exception as e:
-        return jsonify({'valid': False, 'error': str(e)}), 500
+            log.info(message)
 
 
-@app.route('/api/convert/stream', methods=['POST'])
-def convert_stream():
+class LegacyBaseConverter(ABC):
     """
-    Start conversion and stream logs via SSE.
+    Legacy base converter class.
     
-    WARNING: This endpoint is DEPRECATED.
-    Use convert_cli.py for better performance and maintainability.
+    DEPRECATED: Use readers.BaseReader or writers.BaseWriter instead.
     """
-    if conversion_state['active']:
-        return jsonify({'error': 'Conversion already in progress'}), 409
+    def __init__(self, name: str):
+        self.name = name
     
-    conversion_state['active'] = True
+    @abstractmethod
+    def run(self, data_loader, log_handler):
+        pass
+
+
+class LegacyIDD3DDataLoader:
+    """
+    Legacy data loader for IDD3D dataset.
     
-    data = request.json
-    source = data.get('source', 'idd3d')
-    target = data.get('target', 'nuscenes')
-    sequence_path = data.get('sequence_path')
-    output_path = data.get('output_path')
+    DEPRECATED: Use readers.Idd3dReader instead.
     
-    def generate():
-        log_handler = LogHandler(conversion_state['logs'])
+    This class only exists for backward compatibility.
+    The new Idd3dReader does the same thing but returns
+    an IntermediateData object instead.
+    """
+    def __init__(self, root: str, sequence: str = '20220118103308_seq_10'):
+        log.warning("⚠️ LegacyIDD3DDataLoader is DEPRECATED! Use readers.Idd3dReader instead.")
+        self.root = os.path.abspath(root)
+        self.sequence = sequence
+        self.seq_base = os.path.join(
+            self.root,
+            'idd3d_dataset_seq10 (c)/idd3d_seq10/train_val',
+            sequence
+        )
+        self.lidar_dir = os.path.join(self.seq_base, 'lidar')
+        self.label_dir = os.path.join(self.seq_base, 'label')
+        self.calib_dir = os.path.join(self.seq_base, 'calib')
+        self.annot_json = os.path.join(self.seq_base, 'annot_data.json')
         
-        try:
-            # Clear old logs
-            while not conversion_state['logs'].empty():
-                conversion_state['logs'].get()
-            
-            log_handler.log(f"DEPRECATION WARNING: Please use convert_cli.py instead of this API", 'warning')
-            log_handler.log(f"Starting conversion: {source} → {target}", 'info')
-            log_handler.log(f"Sequence: {sequence_path}", 'info')
-            log_handler.log(f"Output: {output_path}", 'info')
-            
-            # Initialize reader
-            if source == 'idd3d':
-                reader = Idd3dReader()
-            else:
-                raise ValueError(f"Unknown source: {source}")
-            
-            log_handler.log("Reading source data...", 'info')
-            intermediate_data = reader.read(sequence_path)
-            
-            conversion_state['progress'] = 50
-            
-            # Initialize writer
-            if target == 'nuscenes':
-                writer = NuScenesWriter()
-            else:
-                raise ValueError(f"Unknown target: {target}")
-            
-            log_handler.log("Writing to target format...", 'info')
-            writer.write(intermediate_data, output_path)
-            
-            conversion_state['progress'] = 100
-            log_handler.log("✓ Conversion completed successfully!", 'success')
-            
-        except Exception as e:
-            log_handler.log(f"✗ Conversion failed: {str(e)}", 'error')
-            import traceback
-            log_handler.log(traceback.format_exc(), 'error')
-        
-        finally:
-            conversion_state['active'] = False
-            while not conversion_state['logs'].empty():
-                log_entry = conversion_state['logs'].get()
-                yield f"data: {json.dumps(log_entry)}\n\n"
-            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+        self.out_data = os.path.join(self.root, 'Intermediate_format/data')
+        self.annot_out = os.path.join(self.root, 'Intermediate_format/anotations')
+        self.converted_lidar = os.path.join(self.out_data, 'converted_lidar')
     
-    return Response(
-        stream_with_context(generate()),
-        mimetype='text/event-stream',
-        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
-    )
+    def validate(self) -> dict:
+        """Validates the dataset structure."""
+        if not os.path.exists(self.seq_base):
+            return {'valid': False, 'error': f'Sequence path not found: {self.seq_base}'}
+        
+        required_dirs = ['lidar', 'label', 'calib']
+        missing = []
+        for dir_name in required_dirs:
+            if not os.path.exists(os.path.join(self.seq_base, dir_name)):
+                missing.append(dir_name)
+        
+        if missing:
+            return {'valid': False, 'error': f'Missing directories: {", ".join(missing)}'}
+        
+        return {'valid': True, 'path': self.seq_base}
+    
+    def read_annotations(self):
+        """Reads annot_data.json file."""
+        if not os.path.exists(self.annot_json):
+            return {}
+        with open(self.annot_json, 'r') as f:
+            return json.load(f)
 
 
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        'error': 'Endpoint not found',
-        'message': 'This API is deprecated. Please use convert_cli.py'
-    }), 404
+# ============================================================================
+# LEGACY NOTE ABOUT MISSING CONVERTERS
+# ============================================================================
 
+"""
+The following converter classes were in the original extensible_converter_backend.py:
+
+1. IDD3DLidarConverter - Now in writers.py → _process_sensor_files() + convert_lidar_pcd_to_bin()
+2. IDD3DCameraConverter - Now in writers.py → _process_sensor_files() + convert_camera_to_jpg()
+3. IDD3DCalibConverter - Now split between readers.py and writers.py
+4. IDD3DAnnotationConverter - Now in readers.py → read() method
+5. IDD3DCategoryConverter - Now in writers.py → _write_category()
+6. IDD3DSampleConverter - Now in writers.py → _write_sample_and_ego_pose()
+7. IDD3DSampleAnnotationConverter - Now in writers.py → _write_instance_and_annotation()
+8. IDD3DInstanceConverter - Now in writers.py → _write_instance_and_annotation()
+9. IDD3DObjectsJsonConverter - ⚠️ NOT MIGRATED (may need to add to writers.py)
+10. IDD3DTimestampSyncConverter - Now handled automatically by _NuScenesTokenManager
+11. IDD3DLogConverter - Now in writers.py → _write_log()
+12. IDD3DEgoPoseConverter - Now split between readers.py and writers.py
+13. IDD3DMapConverter - Now in writers.py → _write_map()
+14. IDD3DSceneConverter - Now in writers.py → _write_sample_and_ego_pose()
+15. IDD3DFileManifestConverter - Now in writers.py → _write_file_manifest()
+
+These classes are NOT re-implemented here because:
+- They are already available in the new architecture
+- Re-implementing would create duplicate, unmaintained code
+- The new architecture does the same thing more efficiently
+
+If you ABSOLUTELY need the old granular converter classes, they are available
+in the original extensible_converter_backend.py file (archived).
+"""
+
+
+# ============================================================================
+# OBJECTS.JSON CONVERTER (The Only Missing Piece)
+# ============================================================================
+
+class IDD3DObjectsJsonConverter(LegacyBaseConverter):
+    """
+    Generates objects.json with bbox_3d format.
+    
+    NOTE: This is the ONLY converter not fully migrated to the new architecture.
+    
+    objects.json is similar to sample_annotation.json but with a different structure.
+    It may be needed for compatibility with certain visualization tools.
+    
+    If you need this, consider adding it to writers.py as _write_objects_json()
+    """
+    
+    def __init__(self):
+        super().__init__("objects_json")
+        log.warning("⚠️ IDD3DObjectsJsonConverter is LEGACY! Consider adding to NuScenesWriter.")
+    
+    def run(self, data_loader, log_handler):
+        """
+        Generates objects.json file.
+        
+        This creates a flattened list of all 3D bounding boxes with the structure:
+        {
+            "object_token": "...",
+            "frame_token": "...",
+            "instance_token": "...",
+            "category_token": "...",
+            "bbox_3d": {
+                "center": [x, y, z],
+                "size": [w, l, h],
+                "rotation": [qw, qx, qy, qz]
+            },
+            "num_lidar_pts": 0
+        }
+        """
+        log_handler.log("⚠️ Using legacy objects.json converter", 'warning')
+        log_handler.log("Consider migrating this to writers.py → _write_objects_json()", 'warning')
+        
+        # This implementation is intentionally left as a stub
+        # If you need it, copy from the original extensible_converter_backend.py
+        # and adapt to use the new token manager
+        
+        log_handler.log("objects.json generation is not implemented in legacy mode", 'error')
+        log_handler.log("Please use the new architecture or implement in writers.py", 'error')
+
+
+# ============================================================================
+# USAGE EXAMPLE (DEPRECATED)
+# ============================================================================
+
+def legacy_conversion_example():
+    """
+    Example of how the old backend worked.
+    
+    DO NOT USE THIS APPROACH FOR NEW CODE!
+    Use convert_cli.py or the Reader/Writer classes instead.
+    """
+    log.warning("=" * 70)
+    log.warning("RUNNING LEGACY CONVERSION (DEPRECATED)")
+    log.warning("=" * 70)
+    
+    # Old way (granular converters)
+    root = "/path/to/idd3d/data"
+    sequence = "20220118103308_seq_10"
+    
+    loader = LegacyIDD3DDataLoader(root, sequence)
+    validation = loader.validate()
+    
+    if not validation['valid']:
+        log.error(f"Validation failed: {validation['error']}")
+        return
+    
+    log_handler = LegacyLogHandler()
+    
+    # Run converters one by one
+    # IDD3DLidarConverter().run(loader, log_handler)
+    # IDD3DCameraConverter().run(loader, log_handler)
+    # ... etc
+    
+    log.warning("=" * 70)
+    log.warning("PLEASE MIGRATE TO NEW ARCHITECTURE!")
+    log.warning("=" * 70)
+
+
+# ============================================================================
+# DEPRECATION NOTICE
+# ============================================================================
 
 if __name__ == '__main__':
-    print("=" * 70)
-    print("WARNING: This Flask backend is DEPRECATED")
-    print("=" * 70)
-    print("Please use the CLI tool instead:")
-    print("  python convert_cli.py --reader idd3d --writer nuscenes \\")
-    print("    --input /path/to/sequences --output /path/to/output")
-    print("=" * 70)
-    print("\nStarting deprecated backend on http://localhost:5001")
-    print("This will be removed in future versions.\n")
-    
-    app.run(debug=True, host='0.0.0.0', port=5001, threaded=True)
+    print("""

@@ -10,6 +10,8 @@ import json
 import shutil
 import logging
 import uuid  # <-- Used for map expansion and prediction
+import re    # <-- ADDED for scene name formatting
+import hashlib # <-- ADDED for scene name formatting
 from abc import ABC, abstractmethod
 from PIL import Image
 from datetime import datetime
@@ -223,6 +225,24 @@ class NuScenesWriter(BaseWriter):
         if last_timestamp: log.info(f"Found existing data. Last timestamp: {last_timestamp}")
         return last_timestamp
 
+    # --- NEW HELPER for scene name formatting ---
+    def _format_scene_name(self, raw_scene_name: str) -> str:
+        """
+        Converts a sequence name like 'idd3d_seq10'
+        into a nuScenes-style 'scene-NNNN' format.
+        """
+        # Try to extract digits from the end of the name
+        match = re.search(r'\d+$', raw_scene_name)
+        if match:
+            num_str = match.group(0)
+            # Format to 4 digits, e.g., "10" -> "0010"
+            return f"scene-{num_str.zfill(4)}"
+        else:
+            # Fallback for names without numbers
+            fallback_hash = hashlib.md5(raw_scene_name.encode()).hexdigest()[:4]
+            log.warning(f"Could not parse number from scene '{raw_scene_name}'. Using fallback name 'scene-{fallback_hash}'")
+            return f"scene-{fallback_hash}"
+
     def _pre_populate_categories(self):
         """
         Manually injects the user's official category tokens
@@ -399,14 +419,18 @@ class NuScenesWriter(BaseWriter):
             log.info(f"Merged and overwrote ego_pose.json. Total items: {len(all_ego_poses)}")
         
         if samples:
+            # --- MODIFIED: Use formatted scene name ---
+            raw_scene_name = samples[0].scene_name
+            formatted_scene_name = self._format_scene_name(raw_scene_name)
+            
             new_scene = {
                 "token": self.token_manager.get_scene_token(),
                 "log_token": self.generated_log_tokens[-1] if self.generated_log_tokens else "",
                 "nbr_samples": len(samples),
                 "first_sample_token": self.token_manager.get_frame_token(samples[0].temp_frame_id),
                 "last_sample_token": self.token_manager.get_frame_token(samples[-1].temp_frame_id),
-                "name": samples[0].scene_name,
-                "description": f"Scene {samples[0].scene_name}"
+                "name": formatted_scene_name, # <-- FIXED
+                "description": f"Scene {raw_scene_name}" # Keep original name in description
             }
             append_to_json_list(os.path.join(self.annot_out_dir, 'scene.json'), [new_scene])
 
@@ -869,7 +893,9 @@ class NuScenesWriter(BaseWriter):
                     prediction_data = {}
             
             # --- Create new entry for this scene ---
-            scene_name = scenes[0].name
+            # --- MODIFIED: Use formatted scene name ---
+            raw_scene_name = scenes[0].name
+            formatted_scene_name = self._format_scene_name(raw_scene_name)
             
             # Find the first sample for this scene
             first_sample = min(samples, key=lambda x: x.timestamp_us)
@@ -883,13 +909,13 @@ class NuScenesWriter(BaseWriter):
                 stubbed_predictions.append(prediction_string)
             
             # Add to the dictionary
-            prediction_data[scene_name] = stubbed_predictions
+            prediction_data[formatted_scene_name] = stubbed_predictions # <-- FIXED
             
             # Write the updated dictionary back to the file
             try:
                 with open(prediction_path, 'w') as f:
                     json.dump(prediction_data, f, indent=2)
-                log.info(f"Merged scene '{scene_name}' into prediction.json.")
+                log.info(f"Merged scene '{formatted_scene_name}' into prediction.json.")
             except Exception as e:
                 log.error(f"FATAL: Could not write prediction.json: {e}")
                 raise

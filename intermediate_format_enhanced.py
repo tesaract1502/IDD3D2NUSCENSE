@@ -1,107 +1,113 @@
+# intermediate_format.py
+# ----------------------
+# This file defines the "Intermediate Format" (IF) for data exchange.
+#
+# - READERS (e.g., Idd3dReader, ArgoverseReader) are responsible FOR CREATING
+#   an instance of the main 'IntermediateData' class.
+#
+# - WRITERS (e.g., NuScenesWriter, KittiWriter) are responsible FOR CONSUMING
+#   an instance of the 'IntermediateData' class.
+#
+# All 'temp_..._id' fields are strings used by the Reader to temporarily
+# identify objects (e.g., "frame_0001", "obj_123"). The Writer is
+# responsible for converting these into its own token/ID system.
+# ----------------------
+
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 @dataclass
 class IFCalibration:
-    sensor_name: str
-    translation: List[float]  # length 3
-    rotation: List[float]     # quaternion length 4 (w, x, y, z)
-    camera_intrinsic: List[List[float]] = field(default_factory=list)  # 3x3 matrix for cameras
-
-    def __post_init__(self):
-        assert len(self.translation) == 3, "Translation must be length 3"
-        assert len(self.rotation) == 4, "Rotation must be quaternion length 4"
-        if self.camera_intrinsic:
-            assert len(self.camera_intrinsic) == 3, "Camera intrinsic must be 3x3"
-            for row in self.camera_intrinsic:
-                assert len(row) == 3, "Camera intrinsic each row must be length 3"
+    """
+    Defines the calibration (extrinsics and intrinsics) for a single sensor.
+    """
+    sensor_name: str                  # The channel/name of the sensor (e.D., "CAM_FRONT", "LIDAR_TOP")
+    translation: List[float]          # Extrinsic translation [x, y, z] relative to the ego vehicle origin
+    rotation: List[float]             # Extrinsic rotation (quaternion) [w, x, y, z]
+    camera_intrinsic: List[List[float]] = field(default_factory=list)  # 3x3 intrinsic matrix, if a camera
 
 @dataclass
 class IFEgoPose:
-    temp_frame_id: str
-    timestamp_us: int
-    translation: List[float]  # length 3
-    rotation: List[float]     # quaternion length 4
-
-    def __post_init__(self):
-        assert len(self.translation) == 3, "Translation must be length 3"
-        assert len(self.rotation) == 4, "Rotation must be quaternion length 4"
+    """
+    Defines the ego vehicle's pose at a specific timestamp.
+    """
+    temp_frame_id: str                # The temporary ID for the frame this pose belongs to
+    timestamp_us: int                 # Timestamp in microseconds
+    translation: List[float]          # [x, y, z] in global coordinates
+    rotation: List[float]             # Quaternion [w, x, y, z] in global coordinates
 
 @dataclass
 class IFInstance:
-    temp_instance_id: str
-    category_name: str
-    attributes: Optional[List[str]] = field(default_factory=list)
+    """
+    Defines a unique object instance (a track).
+    """
+    temp_instance_id: str             # The Reader's unique ID for this track (e.g., "obj_123")
+    category_name: str                # The *standardized* category name (e.g., "vehicle.car")
 
 @dataclass
 class IFAnnotation:
-    temp_instance_id: str
-    temp_frame_id: str
-    timestamp_us: int
-    translation: List[float]  # length 3
-    size: List[float]         # length 3 (width, length, height)
-    rotation: List[float]     # quaternion length 4
-    attributes: Optional[List[str]] = field(default_factory=list)
-
-    def __post_init__(self):
-        assert len(self.translation) == 3, "Translation must be length 3"
-        assert len(self.size) == 3, "Size must be length 3"
-        assert len(self.rotation) == 4, "Rotation must be quaternion length 4"
-
-@dataclass
-class IFSample:
-    temp_frame_id: str
-    timestamp_us: int
-    scene_name: str
+    """
+    Defines a single bounding box annotation for one instance in one frame.
+    """
+    temp_instance_id: str             # The ID of the instance being annotated
+    temp_frame_id: str                # The ID of the frame this annotation is in
+    timestamp_us: int                 # <-- Timestamp for sorting
+    translation: List[float]          # [x, y, z] in the global coordinate frame
+    rotation: List[float]             # Quaternion [w, x, y, z]
+    size: List[float]                 # [width, length, height]
+    attributes: List[str] = field(default_factory=list)  # Standardized attributes (e.g., "vehicle.moving")
 
 @dataclass
 class IFSensorData:
-    temp_frame_id: str
-    sensor_name: str
+    """
+    Represents a single piece of sensor data (e.g., one LiDAR scan, one camera image).
+    """
+    temp_frame_id: str                # The frame ID this sensor data belongs to
+    sensor_name: str                  # The channel of the sensor (e.g., "LIDAR_TOP")
+    
+    # The ORIGINAL filename from the source dataset (e.g., "00000.pcd", "cam0/00000.png")
+    # The Reader provides this, and the Writer uses it to find the source file.
     original_filename: str
-    timestamp_us: int
-    is_keyframe: bool = True
+    
+    timestamp_us: int                 # Timestamp in microseconds
+    is_keyframe: bool = True          # Whether this is a keyframe (for nuScenes)
+
+@dataclass
+class IFSample:
+    """
+    Represents a "keyframe" or "sample" in time, linking all sensor data
+    and annotations for a single timestamp.
+    """
+    temp_frame_id: str                # The Reader's unique ID for this frame (e.g., "00000")
+    timestamp_us: int                 # Timestamp in microseconds
+    scene_name: str                   # The name of the scene this sample belongs to
 
 @dataclass
 class IFScene:
-    name: str
-    description: Optional[str] = ""
+    """
+    Defines a single "scene" or "log" (a continuous driving sequence).
+    """
+    name: str                         # The unique name for this scene (e.g., "idd3d_seq10")
+    description: str                  # A human-readable description
 
 @dataclass
 class IntermediateData:
-    sequence_path: str = ""
+    """
+    This is the main "package" of data passed from the Reader to the Writer.
+    It contains all the processed information from the source dataset.
+    """
+    # --- Lists of objects ---
     scenes: List[IFScene] = field(default_factory=list)
     samples: List[IFSample] = field(default_factory=list)
-    instances: List[IFInstance] = field(default_factory=list)
-    annotations: List[IFAnnotation] = field(default_factory=list)
     sensor_data: List[IFSensorData] = field(default_factory=list)
-    ego_poses: List[IFEgoPose] = field(default_factory=list)
+    annotations: List[IFAnnotation] = field(default_factory=list)
+    instances: List[IFInstance] = field(default_factory=list)
     calibrations: List[IFCalibration] = field(default_factory=list)
-
-    def validateself(self):
-        if not self.scenes:
-            raise ValueError("No scenes defined")
-        if not self.samples:
-            raise ValueError("No samples defined")
-        if not self.calibrations:
-            raise ValueError("No calibrations defined")
-        # Check references
-        sample_frame_ids = {s.temp_frame_id for s in self.samples}
-        instance_ids = {inst.temp_instance_id for inst in self.instances}
-
-        for anno in self.annotations:
-            if anno.temp_frame_id not in sample_frame_ids:
-                raise ValueError(f"Annotation with frame id {anno.temp_frame_id} references unknown sample")
-            if anno.temp_instance_id not in instance_ids:
-                raise ValueError(f"Annotation with instance id {anno.temp_instance_id} references unknown instance")
-
-        for ego_pose in self.ego_poses:
-            if ego_pose.temp_frame_id not in sample_frame_ids:
-                raise ValueError(f"EgoPose with frame id {ego_pose.temp_frame_id} references unknown sample")
-
-        for sensor_data in self.sensor_data:
-            if sensor_data.temp_frame_id not in sample_frame_ids:
-                raise ValueError(f"SensorData with frame id {sensor_data.temp_frame_id} references unknown sample")
-
-        # Add more validation rules as required
-
+    ego_poses: List[IFEgoPose] = field(default_factory=list)
+    
+    # --- File/Path Information ---
+    # The Reader must populate these paths so the Writer knows
+    # where to find the original physical files (e.g., .pcd, .png).
+    
+    # Absolute path to the root of the sequence being processed
+    sequence_path: str = ""

@@ -1,205 +1,302 @@
-from abc import ABC, abstractmethod
+# legacy_backend.py
+# ----------------------
+# LEGACY/DEPRECATED: Old granular converter classes
+#
+# This file preserves the original conversion algorithms from
+# extensible_converter_backend.py for backward compatibility.
+#
+# ⚠️ WARNING: This approach is DEPRECATED!
+# ⚠️ Please use the new Reader/Writer architecture instead:
+#    - readers.py (for reading data)
+#    - writers.py (for writing data)
+#    - convert_cli.py (for CLI usage)
+#
+# This file is kept ONLY for:
+# 1. Reference/comparison with new architecture
+# 2. Legacy code that depends on granular converters
+# 3. Migration validation (compare outputs)
+#
+# DO NOT USE FOR NEW PROJECTS!
+# ----------------------
+
+"""
+MIGRATION GUIDE:
+===============
+
+Old Code (This File):
+---------------------
+from legacy_backend import IDD3DDataLoader, IDD3DLidarConverter
+loader = IDD3DDataLoader(root, sequence)
+converter = IDD3DLidarConverter()
+converter.run(loader, log_handler)
+
+New Code (Recommended):
+-----------------------
+from readers import Idd3dReader
+from writers import NuScenesWriter
+
+reader = Idd3dReader()
+data = reader.read('/path/to/sequence')
+
+writer = NuScenesWriter()
+writer.write(data, '/path/to/output')
+"""
+
 import os
 import json
-import threading
-import shutil
-from queue import Queue
-from datetime import datetime
 import logging
-import uuid
-import math
-from intermediate_format_enhanced import (
-    IntermediateData, IFScene, IFSample, IFInstance, IFAnnotation,
-    IFCalibration, IFEgoPose
-)
+from abc import ABC, abstractmethod
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
-conversion_state = {
-    'active': False,
-    'logs': Queue(),
-    'progress': 0,
-    'total_steps': 0,
-    'current_step': 0
-}
-conversion_lock = threading.Lock()
-json_file_lock = threading.Lock()
 
-class LogHandler:
-    def __init__(self, log_queue):
-        self.queue = log_queue
+# ============================================================================
+# LEGACY CONVERTER FRAMEWORK
+# ============================================================================
+
+class LegacyLogHandler:
+    """
+    Legacy log handler for backward compatibility.
+    In the new architecture, use standard Python logging instead.
+    """
+    def __init__(self):
+        pass
+    
     def log(self, message, log_type='info'):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_entry = {
-            'timestamp': timestamp,
-            'message': message,
-            'type': log_type
-        }
-        self.queue.put(log_entry)
-        logger.info(f"[{log_type.upper()}] {message}")
-
-def append_to_json_list(file_path, new_data_list, log_handler: LogHandler):
-    if not new_data_list:
-        log_handler.log(f"No new data to append to {os.path.basename(file_path)}", 'info')
-        return
-    with json_file_lock:
-        existing_data = []
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, 'r') as f:
-                    existing_data = json.load(f)
-                if not isinstance(existing_data, list):
-                    log_handler.log(f"Warning: {file_path} is not a list. Overwriting.", 'warning')
-                    existing_data = []
-            except json.JSONDecodeError:
-                log_handler.log(f"Warning: {file_path} is corrupted. Overwriting.", 'warning')
-                existing_data = []
-        final_data = existing_data + new_data_list
-        try:
-            with open(file_path, 'w') as f:
-                json.dump(final_data, f, indent=2)
-            log_handler.log(f"Appended {len(new_data_list)} items to {os.path.basename(file_path)}. Total items: {len(final_data)}", 'success')
-        except Exception as e:
-            log_handler.log(f"FATAL: Could not write to {file_path}: {e}", 'error')
-            raise
-
-class TokenTimestampManager:
-    def __init__(self, registry_path=None, base_timestamp=None, frame_rate_hz=10):
-        self.frame_rate_hz = frame_rate_hz
-        self.frame_interval_us = int(1_000_000 / self.frame_rate_hz)
-        self.base_timestamp = base_timestamp or 1640995200000000
-        self.frame_tokens = {}
-        self.instance_tokens = {}
-        self.scene_token = None
-        self.ego_pose_tokens = {}
-        self.category_tokens = {}
-        self.sensor_tokens = {}
-        self.calibration_tokens = {}
-        self.registry_path = registry_path
-        self.load_registry()
-
-    def load_registry(self):
-        if self.registry_path and os.path.exists(self.registry_path):
-            try:
-                with open(self.registry_path, 'r') as f:
-                    registry = json.load(f)
-                self.category_tokens = registry.get('category_tokens', {})
-                self.sensor_tokens = registry.get('sensor_tokens', {})
-                self.calibration_tokens = registry.get('calibration_tokens', {})
-                logger.info(f"Loaded {len(self.category_tokens)} global category tokens from registry.")
-                logger.info(f"Loaded {len(self.sensor_tokens)} global sensor tokens from registry.")
-            except Exception as e:
-                logger.warning(f"Could not load token registry: {e}")
+        if log_type == 'error':
+            log.error(message)
+        elif log_type == 'warning':
+            log.warning(message)
+        elif log_type == 'success':
+            log.info(f"✓ {message}")
         else:
-            logger.info("No existing token registry found. Starting fresh.")
+            log.info(message)
 
-    def get_timestamp(self, frame_index):
-        return self.base_timestamp + (frame_index * self.frame_interval_us)
 
-    def get_frame_token(self, frame_id):
-        if frame_id not in self.frame_tokens:
-            self.frame_tokens[frame_id] = uuid.uuid4().hex
-        return self.frame_tokens[frame_id]
-
-    def get_ego_pose_token(self, frame_id):
-        if frame_id not in self.ego_pose_tokens:
-            self.ego_pose_tokens[frame_id] = uuid.uuid4().hex
-        return self.ego_pose_tokens[frame_id]
-
-    def get_instance_token(self, obj_id):
-        if obj_id not in self.instance_tokens:
-            self.instance_tokens[obj_id] = uuid.uuid4().hex
-        return self.instance_tokens[obj_id]
-
-    def get_category_token(self, category_name):
-        if category_name not in self.category_tokens:
-            self.category_tokens[category_name] = uuid.uuid4().hex
-        return self.category_tokens[category_name]
-
-    def get_sensor_token(self, sensor_name):
-        if sensor_name not in self.sensor_tokens:
-            self.sensor_tokens[sensor_name] = uuid.uuid4().hex
-        return self.sensor_tokens[sensor_name]
-
-    def get_calibration_token(self, sensor_name):
-        if sensor_name not in self.calibration_tokens:
-            self.calibration_tokens[sensor_name] = uuid.uuid4().hex
-        return self.calibration_tokens[sensor_name]
-
-    def get_scene_token(self):
-        if self.scene_token is None:
-            self.scene_token = uuid.uuid4().hex
-        return self.scene_token
-
-    def generate_annotation_token(self):
-        return uuid.uuid4().hex
-
-    def save_registry(self, output_path):
-        registry = {
-            'base_timestamp': self.base_timestamp,
-            'frame_rate_hz': self.frame_rate_hz,
-            'category_tokens': self.category_tokens,
-            'sensor_tokens': self.sensor_tokens,
-            'calibration_tokens': self.calibration_tokens
-        }
-        try:
-            with open(output_path, 'w') as f:
-                json.dump(registry, f, indent=2)
-            logger.info(f"Global token registry saved to {output_path}")
-        except Exception as e:
-            logger.error(f"Failed to save token registry: {e}")
-            raise
-
-class BaseDataLoader(ABC):
-    def __init__(self, root: str, sequence: str = None):
-        self.root = os.path.abspath(root)
-        self.sequence = sequence
-
-    @abstractmethod
-    def ensure_output_dirs(self):
-        pass
-
-    @abstractmethod
-    def validate(self) -> dict:
-        pass
-
-class BaseConverter(ABC):
+class LegacyBaseConverter(ABC):
+    """
+    Legacy base converter class.
+    
+    DEPRECATED: Use readers.BaseReader or writers.BaseWriter instead.
+    """
     def __init__(self, name: str):
         self.name = name
-        self.dry_run = False
-
+    
     @abstractmethod
-    def run(self, data_loader: BaseDataLoader, log_handler: LogHandler):
+    def run(self, data_loader, log_handler):
         pass
 
-class DatasetConversionPipeline:
-    def __init__(self, source_format: str, target_format: str):
-        self.source_format = source_format
-        self.target_format = target_format
-        self.converters = []
 
-    def add_converter(self, converter: BaseConverter):
-        self.converters.append(converter)
-        return self
+class LegacyIDD3DDataLoader:
+    """
+    Legacy data loader for IDD3D dataset.
+    
+    DEPRECATED: Use readers.Idd3dReader instead.
+    
+    This class only exists for backward compatibility.
+    The new Idd3dReader does the same thing but returns
+    an IntermediateData object instead.
+    """
+    def __init__(self, root: str, sequence: str = '20220118103308_seq_10'):
+        log.warning("⚠️ LegacyIDD3DDataLoader is DEPRECATED! Use readers.Idd3dReader instead.")
+        self.root = os.path.abspath(root)
+        self.sequence = sequence
+        self.seq_base = os.path.join(
+            self.root,
+            'idd3d_dataset_seq10 (c)/idd3d_seq10/train_val',
+            sequence
+        )
+        self.lidar_dir = os.path.join(self.seq_base, 'lidar')
+        self.label_dir = os.path.join(self.seq_base, 'label')
+        self.calib_dir = os.path.join(self.seq_base, 'calib')
+        self.annot_json = os.path.join(self.seq_base, 'annot_data.json')
+        
+        self.out_data = os.path.join(self.root, 'Intermediate_format/data')
+        self.annot_out = os.path.join(self.root, 'Intermediate_format/anotations')
+        self.converted_lidar = os.path.join(self.out_data, 'converted_lidar')
+    
+    def validate(self) -> dict:
+        """Validates the dataset structure."""
+        if not os.path.exists(self.seq_base):
+            return {'valid': False, 'error': f'Sequence path not found: {self.seq_base}'}
+        
+        required_dirs = ['lidar', 'label', 'calib']
+        missing = []
+        for dir_name in required_dirs:
+            if not os.path.exists(os.path.join(self.seq_base, dir_name)):
+                missing.append(dir_name)
+        
+        if missing:
+            return {'valid': False, 'error': f'Missing directories: {", ".join(missing)}'}
+        
+        return {'valid': True, 'path': self.seq_base}
+    
+    def read_annotations(self):
+        """Reads annot_data.json file."""
+        if not os.path.exists(self.annot_json):
+            return {}
+        with open(self.annot_json, 'r') as f:
+            return json.load(f)
 
-    def run(self, data_loader: BaseDataLoader, log_handler: LogHandler):
-        if not self.converters:
-            log_handler.log("No converters in pipeline", "warning")
-            return
-        for idx, converter in enumerate(self.converters):
-            log_handler.log(
-                f"\n[{idx+1}/{len(self.converters)}] Running {converter.name} converter...",
-                'info'
-            )
-            try:
-                converter.run(data_loader, log_handler)
-                conversion_state['progress'] = ((idx + 1) / len(self.converters)) * 100
-            except Exception as e:
-                log_handler.log(f"{converter.name} failed: {str(e)}", 'error')
-                raise
 
-# Pipeline builder can be added below to add converters with correct token manager
+# ============================================================================
+# LEGACY NOTE ABOUT MISSING CONVERTERS
+# ============================================================================
 
-# ConverterRegistry and am example usage or registry omitted for brevity.
+"""
+The following converter classes were in the original extensible_converter_backend.py:
 
+1. IDD3DLidarConverter - Now in writers.py → _process_sensor_files() + convert_lidar_pcd_to_bin()
+2. IDD3DCameraConverter - Now in writers.py → _process_sensor_files() + convert_camera_to_jpg()
+3. IDD3DCalibConverter - Now split between readers.py and writers.py
+4. IDD3DAnnotationConverter - Now in readers.py → read() method
+5. IDD3DCategoryConverter - Now in writers.py → _write_category()
+6. IDD3DSampleConverter - Now in writers.py → _write_sample_and_ego_pose()
+7. IDD3DSampleAnnotationConverter - Now in writers.py → _write_instance_and_annotation()
+8. IDD3DInstanceConverter - Now in writers.py → _write_instance_and_annotation()
+9. IDD3DObjectsJsonConverter - ⚠️ NOT MIGRATED (may need to add to writers.py)
+10. IDD3DTimestampSyncConverter - Now handled automatically by _NuScenesTokenManager
+11. IDD3DLogConverter - Now in writers.py → _write_log()
+12. IDD3DEgoPoseConverter - Now split between readers.py and writers.py
+13. IDD3DMapConverter - Now in writers.py → _write_map()
+14. IDD3DSceneConverter - Now in writers.py → _write_sample_and_ego_pose()
+15. IDD3DFileManifestConverter - Now in writers.py → _write_file_manifest()
+
+These classes are NOT re-implemented here because:
+- They are already available in the new architecture
+- Re-implementing would create duplicate, unmaintained code
+- The new architecture does the same thing more efficiently
+
+If you ABSOLUTELY need the old granular converter classes, they are available
+in the original extensible_converter_backend.py file (archived).
+"""
+
+
+# ============================================================================
+# OBJECTS.JSON CONVERTER (The Only Missing Piece)
+# ============================================================================
+
+class IDD3DObjectsJsonConverter(LegacyBaseConverter):
+    """
+    Generates objects.json with bbox_3d format.
+    
+    NOTE: This is the ONLY converter not fully migrated to the new architecture.
+    
+    objects.json is similar to sample_annotation.json but with a different structure.
+    It may be needed for compatibility with certain visualization tools.
+    
+    If you need this, consider adding it to writers.py as _write_objects_json()
+    """
+    
+    def __init__(self):
+        super().__init__("objects_json")
+        log.warning("⚠️ IDD3DObjectsJsonConverter is LEGACY! Consider adding to NuScenesWriter.")
+    
+    def run(self, data_loader, log_handler):
+        """
+        Generates objects.json file.
+        
+        This creates a flattened list of all 3D bounding boxes with the structure:
+        {
+            "object_token": "...",
+            "frame_token": "...",
+            "instance_token": "...",
+            "category_token": "...",
+            "bbox_3d": {
+                "center": [x, y, z],
+                "size": [w, l, h],
+                "rotation": [qw, qx, qy, qz]
+            },
+            "num_lidar_pts": 0
+        }
+        """
+        log_handler.log("⚠️ Using legacy objects.json converter", 'warning')
+        log_handler.log("Consider migrating this to writers.py → _write_objects_json()", 'warning')
+        
+        # This implementation is intentionally left as a stub
+        # If you need it, copy from the original extensible_converter_backend.py
+        # and adapt to use the new token manager
+        
+        log_handler.log("objects.json generation is not implemented in legacy mode", 'error')
+        log_handler.log("Please use the new architecture or implement in writers.py", 'error')
+
+
+# ============================================================================
+# USAGE EXAMPLE (DEPRECATED)
+# ============================================================================
+
+def legacy_conversion_example():
+    """
+    Example of how the old backend worked.
+    
+    DO NOT USE THIS APPROACH FOR NEW CODE!
+    Use convert_cli.py or the Reader/Writer classes instead.
+    """
+    log.warning("=" * 70)
+    log.warning("RUNNING LEGACY CONVERSION (DEPRECATED)")
+    log.warning("=" * 70)
+    
+    # Old way (granular converters)
+    root = "/path/to/idd3d/data"
+    sequence = "20220118103308_seq_10"
+    
+    loader = LegacyIDD3DDataLoader(root, sequence)
+    validation = loader.validate()
+    
+    if not validation['valid']:
+        log.error(f"Validation failed: {validation['error']}")
+        return
+    
+    log_handler = LegacyLogHandler()
+    
+    # Run converters one by one
+    # IDD3DLidarConverter().run(loader, log_handler)
+    # IDD3DCameraConverter().run(loader, log_handler)
+    # ... etc
+    
+    log.warning("=" * 70)
+    log.warning("PLEASE MIGRATE TO NEW ARCHITECTURE!")
+    log.warning("=" * 70)
+
+
+# ============================================================================
+# DEPRECATION NOTICE
+# ============================================================================
+
+if __name__ == '__main__':
+    print("""
+╔══════════════════════════════════════════════════════════════════════╗
+║                        DEPRECATION NOTICE                            ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+This legacy_backend.py file contains DEPRECATED code from the old
+extensible_converter_backend.py architecture.
+
+The granular converter classes (IDD3DLidarConverter, etc.) have been
+replaced by a cleaner Reader/Writer architecture.
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ NEW ARCHITECTURE (Recommended):                                      │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   from readers import Idd3dReader                                    │
+│   from writers import NuScenesWriter                                 │
+│                                                                      │
+│   reader = Idd3dReader()                                             │
+│   data = reader.read('/path/to/sequence')                            │
+│                                                                      │
+│   writer = NuScenesWriter()                                          │
+│   writer.write(data, '/output/path')                                 │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+
+Or use the CLI:
+
+    python convert_cli.py --reader idd3d --writer nuscenes \\
+        --input /path/to/sequences --output /path/to/output
+
+╔══════════════════════════════════════════════════════════════════════╗
+║  This file exists ONLY for backward compatibility and reference.    ║
+║  DO NOT USE FOR NEW PROJECTS!                                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+    """)

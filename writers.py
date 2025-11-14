@@ -875,12 +875,15 @@ class NuScenesWriter(BaseWriter):
             first_sample = min(samples, key=lambda x: x.timestamp_us)
             first_sample_token = self.token_manager.get_frame_token(first_sample.temp_frame_id)
             
-            # Create one stubbed prediction string
-            prediction_id = uuid.uuid4().hex
-            prediction_string = f"{prediction_id}_{first_sample_token}"
+            # --- FIXED: Create a LIST of stubbed predictions ---
+            stubbed_predictions = []
+            for _ in range(3): # Create 3 dummy predictions
+                prediction_id = uuid.uuid4().hex
+                prediction_string = f"{prediction_id}_{first_sample_token}"
+                stubbed_predictions.append(prediction_string)
             
             # Add to the dictionary
-            prediction_data[scene_name] = [prediction_string]
+            prediction_data[scene_name] = stubbed_predictions
             
             # Write the updated dictionary back to the file
             try:

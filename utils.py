@@ -240,7 +240,7 @@ def merge_and_overwrite_json_list(file_path, new_entries, key_field):
         try:
             with open(file_path, 'w') as f:
                 json.dump(final_list, f, indent=2)
-            log.info(f"Merged/overwrote {file_path}. Total items: {len(final_list)}")
+            log.info(f"Merged/overwrote {os.path.basename(file_path)}. Total items: {len(final_list)}")
         except Exception as e:
             log.error(f"FATAL: Could not write to {file_path}: {e}")
             raise

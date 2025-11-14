@@ -10,13 +10,13 @@ import json
 import shutil
 import logging
 import uuid  # <-- Used for map expansion and prediction
-import re    # <-- ADDED for scene name formatting
-import hashlib # <-- ADDED for scene name formatting
+import re    
+import hashlib 
 from abc import ABC, abstractmethod
 from PIL import Image
 from datetime import datetime
 from intermediate_format import IntermediateData
-from utils import TokenTimestampManager, append_to_json_list, json_file_lock, merge_and_overwrite_json_list
+from utils import append_to_json_list, json_file_lock, merge_and_overwrite_json_list, load_json_safely, save_json_safely
 
 # --- MODIFIED: Added pyarrow and pandas ---
 try:
@@ -164,7 +164,7 @@ class NuScenesWriter(BaseWriter):
         last_timestamp = self._get_last_timestamp()
         new_base_timestamp = (last_timestamp + 20_000_000) if last_timestamp else None # 20-sec gap
         
-        self.token_manager = TokenTimestampManager(
+        self.token_manager = _NuScenesTokenManager(
             registry_path=registry_path,
             base_timestamp=new_base_timestamp
         )
@@ -205,7 +205,7 @@ class NuScenesWriter(BaseWriter):
         
         # --- 6. Save Token Registry ---
         log.info("Saving global token registry...")
-        self.token_manager.save_registry(registry_path)
+        self.token_manager.save_registry()
         
         log.info(f"--- NuScenes Write Complete ---")
         log.info(f"Output successfully written to: {self.output_path}")
@@ -378,10 +378,10 @@ class NuScenesWriter(BaseWriter):
 
         with json_file_lock:
             if os.path.exists(sample_path):
-                try: all_samples = json.load(open(sample_path, 'r'))
+                try: all_samples = load_json_safely(sample_path, default=[])
                 except: log.warning("sample.json corrupted. Overwriting.")
             if os.path.exists(ego_pose_path):
-                try: all_ego_poses = json.load(open(ego_pose_path, 'r'))
+                try: all_ego_poses = load_json_safely(ego_pose_path, default=[])
                 except: log.warning("ego_pose.json corrupted. Overwriting.")
         
         for if_sample in samples:
@@ -413,9 +413,9 @@ class NuScenesWriter(BaseWriter):
             final_samples.extend(scene_samples)
         
         with json_file_lock:
-            json.dump(final_samples, open(sample_path, 'w'), indent=2)
+            save_json_safely(sample_path, final_samples)
             log.info(f"Merged and overwrote sample.json. Total items: {len(final_samples)}")
-            json.dump(all_ego_poses, open(ego_pose_path, 'w'), indent=2)
+            save_json_safely(ego_pose_path, all_ego_poses)
             log.info(f"Merged and overwrote ego_pose.json. Total items: {len(all_ego_poses)}")
         
         if samples:
@@ -438,11 +438,7 @@ class NuScenesWriter(BaseWriter):
     def _write_sample_data(self, sensor_data, sequence_name):
         sample_data_path = os.path.join(self.annot_out_dir, 'sample_data.json')
         
-        all_sample_data = []
-        with json_file_lock:
-            if os.path.exists(sample_data_path):
-                try: all_sample_data = json.load(open(sample_data_path, 'r'))
-                except: log.warning("sample_data.json corrupted. Overwriting.")
+        all_sample_data = load_json_safely(sample_data_path, default=[])
 
         for if_data in sensor_data:
             sd_token = uuid.uuid4().hex
@@ -489,7 +485,7 @@ class NuScenesWriter(BaseWriter):
             final_sample_data.extend(sorted_list)
         
         with json_file_lock:
-            json.dump(final_sample_data, open(sample_data_path, 'w'), indent=2)
+            save_json_safely(sample_data_path, final_sample_data)
             log.info(f"Merged and overwrote sample_data.json. Total items: {len(final_sample_data)}")
 
     def _write_category(self, instances):
@@ -523,14 +519,9 @@ class NuScenesWriter(BaseWriter):
         ann_path = os.path.join(self.annot_out_dir, 'sample_annotation.json')
 
         with json_file_lock:
-            try:
-                all_anns = json.load(open(ann_path, 'r')) if os.path.exists(ann_path) else []
-            except: all_anns = []; log.warning("sample_annotation.json corrupted.")
-            
-            try:
-                inst_list = json.load(open(instance_path, 'r')) if os.path.exists(instance_path) else []
-                inst_db = {i['token']: i for i in inst_list}
-            except: inst_db = {}; log.warning("instance.json corrupted.")
+            all_anns = load_json_safely(ann_path, default=[])
+            inst_list = load_json_safely(instance_path, default=[])
+            inst_db = {i['token']: i for i in inst_list}
 
         new_anns_by_inst_id = {}
         for ann in annotations:
@@ -540,9 +531,7 @@ class NuScenesWriter(BaseWriter):
 
         inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
         
-        used_category_tokens = set()
-        for inst in inst_db.values():
-            used_category_tokens.add(inst['category_token'])
+        used_category_tokens = {inst['category_token'] for inst in inst_db.values()}
 
         for temp_inst_id, new_anns_list in new_anns_by_inst_id.items():
             inst_token = self.token_manager.get_instance_token(temp_inst_id)
@@ -559,7 +548,7 @@ class NuScenesWriter(BaseWriter):
                 attribute_tokens = []
                 if category_name.startswith('vehicle.'):
                     attribute_tokens = [self.token_manager.get_attribute_token("vehicle.moving")]
-                elif category_name.startswith('human.'):
+                elif category_name.startswith('human.') or 'pedestrian' in category_name.lower():
                     attribute_tokens = [self.token_manager.get_attribute_token("pedestrian.moving")]
 
                 ann_token = generated_tokens[i]
@@ -612,12 +601,12 @@ class NuScenesWriter(BaseWriter):
                     dummy_instance_count += 1
         
         if dummy_instance_count > 0:
-            log.info(f"Created {dummy_instance_count} dummy instances to satisfy devkit (for unused categories).")
+            log.info(f"Created {dummy_instance_count} dummy instances for unused categories")
 
         with json_file_lock:
-            json.dump(list(inst_db.values()), open(instance_path, 'w'), indent=2)
+            save_json_safely(instance_path, list(inst_db.values()))
             log.info(f"Merged and overwrote instance.json. Total items: {len(inst_db)}")
-            json.dump(all_anns, open(ann_path, 'w'), indent=2)
+            save_json_safely(ann_path, all_anns)
             log.info(f"Merged and overwrote sample_annotation.json. Total items: {len(all_anns)}")
 
 
@@ -644,8 +633,8 @@ class NuScenesWriter(BaseWriter):
 
     def _write_attribute(self):
         attributes = [
-            {"name": "vehicle.moving", "description": "Vehicle is moving (default stub)"},
-            {"name": "pedestrian.moving", "description": "Pedestrian is moving (default stub)"},
+            {"name": "vehicle.moving", "description": "Vehicle is moving"},
+            {"name": "pedestrian.moving", "description": "Pedestrian is moving"},
         ]
         new_entries = []
         for attr in attributes:
@@ -680,7 +669,7 @@ class NuScenesWriter(BaseWriter):
         )
         
         # --- Create the main map image ---
-        image_path = os.path.join(self.maps_out_dir, f"{location.lower()}.png")
+        image_path = os.path.join(self.maps_dir, f"{location.lower()}.png")
         if not os.path.exists(image_path):
             try:
                 img = Image.new('RGB', (10, 10), color='black')
@@ -879,46 +868,35 @@ class NuScenesWriter(BaseWriter):
         prediction_path = os.path.join(self.map_expansion_prediction_dir, "prediction.json")
         
         # Load existing prediction data
-        prediction_data = {}
-        with json_file_lock:
-            if os.path.exists(prediction_path):
-                try:
-                    with open(prediction_path, 'r') as f:
-                        prediction_data = json.load(f)
-                    if not isinstance(prediction_data, dict):
-                        log.warning("prediction.json is not a dictionary. Overwriting.")
-                        prediction_data = {}
-                except json.JSONDecodeError:
-                    log.warning("prediction.json is corrupted. Overwriting.")
-                    prediction_data = {}
-            
-            # --- Create new entry for this scene ---
-            # --- MODIFIED: Use formatted scene name ---
-            raw_scene_name = scenes[0].name
-            formatted_scene_name = self._format_scene_name(raw_scene_name)
-            
-            # Find the first sample for this scene
-            first_sample = min(samples, key=lambda x: x.timestamp_us)
-            first_sample_token = self.token_manager.get_frame_token(first_sample.temp_frame_id)
-            
-            # --- FIXED: Create a LIST of stubbed predictions ---
-            stubbed_predictions = []
-            for _ in range(3): # Create 3 dummy predictions
-                prediction_id = uuid.uuid4().hex
-                prediction_string = f"{prediction_id}_{first_sample_token}"
-                stubbed_predictions.append(prediction_string)
-            
-            # Add to the dictionary
-            prediction_data[formatted_scene_name] = stubbed_predictions # <-- FIXED
-            
-            # Write the updated dictionary back to the file
-            try:
-                with open(prediction_path, 'w') as f:
-                    json.dump(prediction_data, f, indent=2)
-                log.info(f"Merged scene '{formatted_scene_name}' into prediction.json.")
-            except Exception as e:
-                log.error(f"FATAL: Could not write prediction.json: {e}")
-                raise
+        prediction_data = load_json_safely(prediction_path, default={})
+        
+        # --- Create new entry for this scene ---
+        raw_scene_name = scenes[0].name
+        formatted_scene_name = self._format_scene_name(raw_scene_name)
+        
+        # Find the first sample for this scene
+        first_sample = min(samples, key=lambda x: x.timestamp_us)
+        first_sample_token = self.token_manager.get_frame_token(first_sample.temp_frame_id)
+        
+        # --- FIXED: Create a LIST of stubbed predictions in the correct format ---
+        stubbed_predictions = []
+        for _ in range(3): # Create 3 dummy predictions
+            prediction_id = uuid.uuid4().hex
+            # --- FIXED: Swapped order to [PREDICTION_ID]_[SAMPLE_TOKEN] ---
+            prediction_string = f"{prediction_id}_{first_sample_token}"
+            stubbed_predictions.append(prediction_string)
+        
+        # Add to the dictionary
+        prediction_data[formatted_scene_name] = stubbed_predictions
+        
+        # Write the updated dictionary back to the file
+        try:
+            with open(prediction_path, 'w') as f:
+                json.dump(prediction_data, f, indent=2)
+            log.info(f"Merged scene '{formatted_scene_name}' into prediction.json.")
+        except Exception as e:
+            log.error(f"FATAL: Could not write prediction.json: {e}")
+            raise
 
 
     # --- File Processing Methods (called by write()) ---
@@ -935,7 +913,7 @@ class NuScenesWriter(BaseWriter):
             if sd.original_filename.endswith('.pcd'):
                 src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
                 output_filename = f"{output_filename_base}.pcd.bin"
-                dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
+                dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
                 
@@ -946,7 +924,7 @@ class NuScenesWriter(BaseWriter):
             elif sd.original_filename.endswith('.feather'):
                 src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
                 output_filename = f"{output_filename_base}.pcd.bin"
-                dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
+                dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
                 
@@ -958,7 +936,7 @@ class NuScenesWriter(BaseWriter):
                 # Source filename can be "cam0/00000.png" (IDD3D) or "ring_front_center/1234.jpg" (AV2)
                 src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
                 output_filename = f"{output_filename_base}.jpg"
-                dst_folder = os.path.join(self.samples_out_dir, sd.sensor_name)
+                dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
                 os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
                 
@@ -969,14 +947,14 @@ class NuScenesWriter(BaseWriter):
         log.info(f"Processed {num_lidar} new LiDAR files and {num_camera} new camera files.")
 
     def _duplicate_sweeps(self):
-        if os.path.exists(self.sweeps_out_dir):
-            try: shutil.rmtree(self.sweeps_out_dir)
+        if os.path.exists(self._sweeps_dir):
+            try: shutil.rmtree(self._sweeps_dir)
             except Exception as e:
                 log.error(f"Could not remove 'sweeps' directory: {e}")
                 return
         try:
-            shutil.copytree(self.samples_out_dir, self.sweeps_out_dir)
-            log.info(f"Successfully duplicated 'samples' to 'sweeps'.")
+            shutil.copytree(self._samples_dir, self._sweeps_dir)
+            log.info("Successfully duplicated 'samples' to 'sweeps'.")
         except Exception as e:
             log.error(f"FATAL: Could not copy 'samples' to 'sweeps': {e}")
             raise

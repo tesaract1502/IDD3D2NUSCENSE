@@ -19,7 +19,7 @@ class BaseReader(ABC):
     """
     Abstract base class for all dataset readers.
     """
-    @abstractabstractmethod
+    @abstractmethod
     def read(self, sequence_path: str) -> IntermediateData:
         """
         Reads a dataset sequence from 'sequence_path' and returns
@@ -46,7 +46,7 @@ class Idd3dReader(BaseReader):
             'Bus': 'vehicle.bus',
             'Motorcycle': 'vehicle.motorcycle',
             'Bicycle': 'vehicle.bicycle',
-            'Person': 'movable_object.pedestrian', # Was human.pedestrian.adult
+            'Person': 'movable_object.pedestrian',
             
             # Guesses for other valid mappings
             'Auto': 'movable_object.van', # Map Auto-rickshaw to 'van'
@@ -55,11 +55,11 @@ class Idd3dReader(BaseReader):
             
             # Mappings to UNKNOWN (since they aren't in category2.json)
             'Animal': 'movable_object.unknown',
-            'TrafficLight': 'movable_object.unknown', # Was static_object.traffic_light
-            'TrafficSign': 'movable_object.unknown', # Was static_object.traffic_sign
-            'Pole': 'movable_object.unknown', # Was static_object.pole
-            'OtherVehicle': 'movable_object.unknown', # Was vehicle.other
-            'Misc': 'movable_object.unknown' # Was movable_object.debris
+            'TrafficLight': 'movable_object.unknown',
+            'TrafficSign': 'movable_object.unknown',
+            'Pole': 'movable_object.unknown',
+            'OtherVehicle': 'movable_object.unknown',
+            'Misc': 'movable_object.unknown'
         }
         
         # This mapping is moved from the old IDD3DDataLoader
@@ -254,3 +254,29 @@ class Idd3dReader(BaseReader):
         log.info(f"---------------------------")
         
         return data
+
+# -----------------------------------------------------------------------------
+#  ARGOVERSE READER (STUB)
+# -----------------------------------------------------------------------------
+
+class ArgoverseReader(BaseReader):
+    """
+    Reads data from the Argoverse 2 dataset format.
+    (NOT YET IMPLEMENTED)
+    """
+    
+    def __init__(self):
+        log.info("ArgoverseReader initialized (stub).")
+        # In the future, we will add AV2->nuScenes category mapping here
+        self.AV2_TO_NUSCENES_MAP = {}
+
+    def read(self, sequence_path: str) -> IntermediateData:
+        """
+        Reads a specific Argoverse 2 sequence.
+        (NOT YET IMPLEMENTED)
+        """
+        log.error("=" * 70)
+        log.error("Argoverse 2 conversion is not yet implemented.")
+        log.error("=" * 70)
+        # Return empty data to prevent a crash
+        return IntermediateData(sequence_path=sequence_path)

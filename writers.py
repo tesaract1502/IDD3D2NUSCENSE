@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from PIL import Image
 from datetime import datetime
 from intermediate_format import IntermediateData
-from utils import append_to_json_list, json_file_lock, merge_and_overwrite_json_list, load_json_safely, save_json_safely
+from utils import TokenTimestampManager, append_to_json_list, json_file_lock, merge_and_overwrite_json_list
 
 # --- MODIFIED: Added pyarrow and pandas ---
 try:
@@ -164,7 +164,7 @@ class NuScenesWriter(BaseWriter):
         last_timestamp = self._get_last_timestamp()
         new_base_timestamp = (last_timestamp + 20_000_000) if last_timestamp else None # 20-sec gap
         
-        self.token_manager = _NuScenesTokenManager(
+        self.token_manager = TokenTimestampManager(
             registry_path=registry_path,
             base_timestamp=new_base_timestamp
         )
@@ -205,7 +205,7 @@ class NuScenesWriter(BaseWriter):
         
         # --- 6. Save Token Registry ---
         log.info("Saving global token registry...")
-        self.token_manager.save_registry()
+        self.token_manager.save_registry(registry_path)
         
         log.info(f"--- NuScenes Write Complete ---")
         log.info(f"Output successfully written to: {self.output_path}")
@@ -378,10 +378,10 @@ class NuScenesWriter(BaseWriter):
 
         with json_file_lock:
             if os.path.exists(sample_path):
-                try: all_samples = load_json_safely(sample_path, default=[])
+                try: all_samples = json.load(open(sample_path, 'r'))
                 except: log.warning("sample.json corrupted. Overwriting.")
             if os.path.exists(ego_pose_path):
-                try: all_ego_poses = load_json_safely(ego_pose_path, default=[])
+                try: all_ego_poses = json.load(open(ego_pose_path, 'r'))
                 except: log.warning("ego_pose.json corrupted. Overwriting.")
         
         for if_sample in samples:
@@ -413,9 +413,9 @@ class NuScenesWriter(BaseWriter):
             final_samples.extend(scene_samples)
         
         with json_file_lock:
-            save_json_safely(sample_path, final_samples)
+            json.dump(final_samples, open(sample_path, 'w'), indent=2)
             log.info(f"Merged and overwrote sample.json. Total items: {len(final_samples)}")
-            save_json_safely(ego_pose_path, all_ego_poses)
+            json.dump(all_ego_poses, open(ego_pose_path, 'w'), indent=2)
             log.info(f"Merged and overwrote ego_pose.json. Total items: {len(all_ego_poses)}")
         
         if samples:
@@ -438,7 +438,11 @@ class NuScenesWriter(BaseWriter):
     def _write_sample_data(self, sensor_data, sequence_name):
         sample_data_path = os.path.join(self.annot_out_dir, 'sample_data.json')
         
-        all_sample_data = load_json_safely(sample_data_path, default=[])
+        all_sample_data = []
+        with json_file_lock:
+            if os.path.exists(sample_data_path):
+                try: all_sample_data = json.load(open(sample_data_path, 'r'))
+                except: log.warning("sample_data.json corrupted. Overwriting.")
 
         for if_data in sensor_data:
             sd_token = uuid.uuid4().hex
@@ -485,7 +489,7 @@ class NuScenesWriter(BaseWriter):
             final_sample_data.extend(sorted_list)
         
         with json_file_lock:
-            save_json_safely(sample_data_path, final_sample_data)
+            json.dump(final_sample_data, open(sample_data_path, 'w'), indent=2)
             log.info(f"Merged and overwrote sample_data.json. Total items: {len(final_sample_data)}")
 
     def _write_category(self, instances):
@@ -537,23 +541,22 @@ class NuScenesWriter(BaseWriter):
             inst_token = self.token_manager.get_instance_token(temp_inst_id)
             new_anns_list.sort(key=lambda x: x.timestamp_us)
             
-            last_ann_token = ""
+            last_ann_token_from_existing = ""
             if inst_token in inst_db:
-                last_ann_token = inst_db[inst_token]['last_annotation_token']
-            
+                last_ann_token_from_existing = inst_db[inst_token]['last_annotation_token']
+
             generated_tokens = [self.token_manager.generate_annotation_token() for _ in new_anns_list]
             
             for i, if_ann in enumerate(new_anns_list):
                 category_name = inst_name_map.get(temp_inst_id, "")
-                
                 attribute_tokens = []
                 if category_name.startswith('vehicle.'):
                     attribute_tokens = [self.token_manager.get_attribute_token("vehicle.moving")]
                 elif category_name.startswith('human.') or 'pedestrian' in category_name.lower():
                     attribute_tokens = [self.token_manager.get_attribute_token("pedestrian.moving")]
-                
+
                 ann_token = generated_tokens[i]
-                prev_token = generated_tokens[i-1] if i > 0 else last_ann_token
+                prev_token = generated_tokens[i-1] if i > 0 else last_ann_token_from_existing
                 next_token = generated_tokens[i+1] if i < len(generated_tokens) - 1 else ""
                 
                 all_anns.append({
@@ -565,15 +568,13 @@ class NuScenesWriter(BaseWriter):
                     "translation": if_ann.translation,
                     "size": if_ann.size,
                     "rotation": if_ann.rotation,
-                    "prev": prev_token,
-                    "next": next_token,
-                    "num_lidar_pts": 0,
-                    "num_radar_pts": 0
+                    "prev": prev_token, "next": next_token,
+                    "num_lidar_pts": 0, "num_radar_pts": 0
                 })
-            
+
             category_token = self.token_manager.get_category_token(inst_name_map.get(temp_inst_id, ""))
             used_category_tokens.add(category_token)
-            
+
             if inst_token not in inst_db:
                 inst_db[inst_token] = {
                     "token": inst_token,
@@ -586,14 +587,14 @@ class NuScenesWriter(BaseWriter):
                 inst_db[inst_token]["nbr_annotations"] += len(generated_tokens)
                 inst_db[inst_token]["last_annotation_token"] = generated_tokens[-1]
         
-        log.info("Creating dummy instances for unused categories...")
-        dummy_count = 0
+        log.info("Checking for unused categories to create dummy instances...")
+        dummy_instance_count = 0
         
         for cat_name, cat_token in self.token_manager.category_tokens.items():
             if cat_token not in used_category_tokens:
-                dummy_instance_token = self.token_manager.get_instance_token(f"dummy_{cat_name}")
+                dummy_instance_token = self.token_manager.get_instance_token(f"dummy_instance_for_{cat_name}")
                 
-                if dummy_instance_token not in inst_db:
+                if dummy_instance_token not in inst_db: 
                     inst_db[dummy_instance_token] = {
                         "token": dummy_instance_token,
                         "category_token": cat_token,
@@ -601,15 +602,18 @@ class NuScenesWriter(BaseWriter):
                         "first_annotation_token": dummy_instance_token,
                         "last_annotation_token": dummy_instance_token
                     }
-                    dummy_count += 1
+                    dummy_instance_count += 1
         
-        if dummy_count > 0:
-            log.info(f"Created {dummy_count} dummy instances for unused categories")
-        
-        save_json_safely(instance_path, list(inst_db.values()))
-        save_json_safely(ann_path, all_anns)
-        log.info(f"Wrote instance.json ({len(inst_db)} instances) and sample_annotation.json ({len(all_anns)} annotations)")
-    
+        if dummy_instance_count > 0:
+            log.info(f"Created {dummy_instance_count} dummy instances for unused categories")
+
+        with json_file_lock:
+            save_json_safely(instance_path, list(inst_db.values()))
+            log.info(f"Merged and overwrote instance.json. Total items: {len(inst_db)}")
+            save_json_safely(ann_path, all_anns)
+            log.info(f"Merged and overwrote sample_annotation.json. Total items: {len(all_anns)}")
+
+
     def _write_visibility(self):
         vis_levels = [
             {"level": "v1-0", "description": "visibility 0-40%"},
@@ -669,7 +673,7 @@ class NuScenesWriter(BaseWriter):
         )
         
         # --- Create the main map image ---
-        image_path = os.path.join(self.maps_out_dir, f"{location.lower()}.png")
+        image_path = os.path.join(self.maps_dir, f"{location.lower()}.png")
         if not os.path.exists(image_path):
             try:
                 img = Image.new('RGB', (10, 10), color='black')
@@ -882,7 +886,7 @@ class NuScenesWriter(BaseWriter):
         stubbed_predictions = []
         for _ in range(3): # Create 3 dummy predictions
             prediction_id = uuid.uuid4().hex
-            # --- FIXED: Swapped order to [PREDICTION_ID]_[SAMPLE_TOKEN] ---
+            # --- FINAL FIX: [PREDICTION_ID]_[SAMPLE_TOKEN] ---
             prediction_string = f"{prediction_id}_{first_sample_token}"
             stubbed_predictions.append(prediction_string)
         
@@ -929,7 +933,7 @@ class NuScenesWriter(BaseWriter):
                 dst_file = os.path.join(dst_folder, output_filename)
                 
                 if not os.path.exists(dst_file):
-                    convert_lidar_feather_to_bin(src_file, dst_file) # <-- Use new helper
+                    convert_feather_to_pcd_bin(src_file, dst_file) # <-- Use new helper
                     num_lidar += 1
             
             else: # It's a camera

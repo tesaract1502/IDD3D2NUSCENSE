@@ -184,7 +184,7 @@ class NuScenesWriter(BaseWriter):
         self._write_log(data.scenes)
         self._write_map() # Creates hyderabad.png
         self._write_map_expansion() 
-        self._write_prediction(data.scenes, data.samples) # <-- ADDED
+        self._write_prediction(data.scenes, data.samples)
         self._write_file_manifest(data) 
 
         self._write_sample_and_ego_pose(data.samples, data.ego_poses)
@@ -517,7 +517,6 @@ class NuScenesWriter(BaseWriter):
         inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
         
         used_category_tokens = set()
-        # --- NEW: Get category tokens that already have instances ---
         for inst in inst_db.values():
             used_category_tokens.add(inst['category_token'])
 
@@ -738,59 +737,101 @@ class NuScenesWriter(BaseWriter):
             
         append_to_json_list(os.path.join(self.annot_out_dir, 'file_manifest.json'), new_entries)
 
-    # --- NEW: Map Expansion Stub Method ---
+    # --- REWRITTEN: Map Expansion Stub Method ---
     def _write_map_expansion(self):
         """
-        Creates a stubbed hyderabad.json map expansion file.
+        Creates a stubbed singapore-queenstown.json map expansion file,
+        matching the complex structure with polygon and node keys.
         """
         log.info("Creating stubbed map expansion file...")
-        expansion_path = os.path.join(self.map_expansion_expansion_dir, "hyderabad.json")
+        # --- FIXED: New filename ---
+        expansion_path = os.path.join(self.map_expansion_expansion_dir, "singapore-queenstown.json")
 
-        # Generate tokens
+        # Create a handful of nodes
+        node_tokens = [uuid.uuid4().hex for _ in range(4)]
+        nodes = [
+            {"token": node_tokens[0], "x": 10.0, "y": 10.0},
+            {"token": node_tokens[1], "x": 10.0, "y": -10.0},
+            {"token": node_tokens[2], "x": -10.0, "y": -10.0},
+            {"token": node_tokens[3], "x": -10.0, "y": 10.0}
+        ]
+        
+        # Create one polygon
         poly_token = uuid.uuid4().hex
-        node1_token = uuid.uuid4().hex
-        node2_token = uuid.uuid4().hex
-        node3_token = uuid.uuid4().hex
-        node4_token = uuid.uuid4().hex
-        lane1_token = uuid.uuid4().hex
-        edge1_token = uuid.uuid4().hex
-        edge2_token = uuid.uuid4().hex
+        polygons = [
+            {
+                "token": poly_token,
+                "exterior_node_tokens": node_tokens,
+                "holes": []
+            }
+        ]
+        
+        # Create lane dividers
+        divider1_token = uuid.uuid4().hex
+        divider2_token = uuid.uuid4().hex
+        lane_dividers = [
+            {
+                "token": divider1_token,
+                "line_token": uuid.uuid4().hex, # Stub
+                "lane_divider_segments": [
+                    {
+                        "node_token": node_tokens[0],
+                        "segment_type": "DOUBLE_DASHED_WHITE"
+                    }
+                ]
+            },
+            {
+                "token": divider2_token,
+                "line_token": uuid.uuid4().hex, # Stub
+                "lane_divider_segments": [
+                    {
+                        "node_token": node_tokens[1],
+                        "segment_type": "DOUBLE_DASHED_WHITE"
+                    }
+                ]
+            }
+        ]
 
+        # Create one lane
+        lanes = [
+            {
+                "token": uuid.uuid4().hex,
+                "polygon_token": poly_token,
+                "lane_type": "car",
+                "from_edge_line_token": divider1_token,
+                "to_edge_line_token": divider2_token,
+                "left_lane_divider_segment": [], # Stub
+                "right_lane_divider_segment": [] # Stub
+            }
+        ]
+        
+        # Create one road segment
+        road_seg_token = uuid.uuid4().hex
+        road_segments = [
+            {
+                "token": road_seg_token,
+                "polygon_token": poly_token,
+                "is_intersection": False
+            }
+        ]
+        
+        # Create one drivable area
+        drivable_areas = [
+            {
+                "token": uuid.uuid4().hex,
+                "road_segment_tokens": [road_seg_token]
+            }
+        ]
+
+        # Assemble the final JSON structure
         stub_data = {
-            "version": "1.3",
-            "polygon": [
-                {
-                    "token": poly_token,
-                    "exterior_node_token": [node1_token, node2_token, node3_token, node4_token],
-                    "holes": []
-                }
-            ],
-            "node": [
-                {"token": node1_token, "x": 10.0, "y": 10.0},
-                {"token": node2_token, "x": 10.0, "y": -10.0},
-                {"token": node3_token, "x": -10.0, "y": -10.0},
-                {"token": node4_token, "x": -10.0, "y": 10.0}
-            ],
-            "lane": [
-                {
-                    "token": lane1_token,
-                    "polygon_token": poly_token,
-                    "lane_type": "car",
-                    "from_edge_line_token": edge1_token,
-                    "to_edge_line_token": edge2_token,
-                    "left_lane_divider_segment": [],
-                    "right_lane_divider_segment": [
-                        {
-                            "node_token": edge1_token,
-                            "segment_type": "DOUBLE-DASHED_WHITE"
-                        },
-                        {
-                            "node_token": edge2_token,
-                            "segment_type": "DOUBLE-DASHED_WHITE"
-                        }
-                    ]
-                }
-            ]
+            "polygon": polygons,
+            "node": nodes,
+            "lane": lanes,
+            "lane_divider_segment": lane_dividers,
+            "road_segment": road_segments,
+            "drivable_area": drivable_areas,
+            "traffic_control": [] # Stub empty traffic control
         }
 
         try:

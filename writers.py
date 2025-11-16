@@ -575,59 +575,275 @@ class NuScenesWriter(BaseWriter):
                 log.error(f"Could not copy basemap image: {e}")
     
     def _write_map_expansion(self):
-        """Creates stubbed map expansion file."""
-        log.info("Creating stubbed map expansion file...")
+        """Creates map expansion file matching nuScenes format."""
         expansion_path = os.path.join(self._map_expansion_dir, 'expansion', 'singapore-queenstown.json')
         
-        node_tokens = [uuid.uuid4().hex for _ in range(4)]
-        nodes = [
-            {"token": node_tokens[0], "x": 10.0, "y": 10.0},
-            {"token": node_tokens[1], "x": 10.0, "y": -10.0},
-            {"token": node_tokens[2], "x": -10.0, "y": -10.0},
-            {"token": node_tokens[3], "x": -10.0, "y": 10.0}
-        ]
+        node_tokens = [uuid.uuid4().hex for _ in range(100)]
+        nodes = []
+        for i, token in enumerate(node_tokens):
+            nodes.append({
+                "token": token,
+                "x": 1000.0 + i * 50.0,
+                "y": 1500.0 + i * 30.0
+            })
         
-        poly_token = uuid.uuid4().hex
-        polygons = [{
-            "token": poly_token,
-            "exterior_node_tokens": node_tokens,
-            "holes": []
-        }]
+        poly_tokens = [uuid.uuid4().hex for _ in range(6)]
+        polygons = []
+        for i, token in enumerate(poly_tokens):
+            start_idx = i * 15
+            end_idx = start_idx + 15
+            polygons.append({
+                "token": token,
+                "exterior_node_tokens": node_tokens[start_idx:end_idx] if end_idx <= len(node_tokens) else node_tokens[start_idx:],
+                "holes": []
+            })
+        
+        line_tokens = [uuid.uuid4().hex for _ in range(10)]
+        lines = []
+        for i, token in enumerate(line_tokens):
+            start_idx = i * 8
+            end_idx = start_idx + 8
+            lines.append({
+                "token": token,
+                "node_tokens": node_tokens[start_idx:end_idx] if end_idx <= len(node_tokens) else node_tokens[start_idx:]
+            })
+        
+        lane_divider_tokens = [uuid.uuid4().hex for _ in range(8)]
+        lane_dividers = []
+        segment_types = ["DOUBLE_DASHED_WHITE", "SINGLE_SOLID_WHITE", "NIL"]
+        for i, token in enumerate(lane_divider_tokens):
+            segments = []
+            segment_type = segment_types[i % len(segment_types)]
+            for j in range(6):
+                node_idx = i * 6 + j
+                segments.append({
+                    "node_token": node_tokens[node_idx] if node_idx < len(node_tokens) else node_tokens[0],
+                    "segment_type": segment_type
+                })
+            lane_dividers.append({
+                "token": token,
+                "line_token": line_tokens[i % len(line_tokens)],
+                "lane_divider_segments": segments
+            })
+        
+        lane_tokens = [uuid.uuid4().hex for _ in range(8)]
+        lanes = []
+        for i, token in enumerate(lane_tokens):
+            left_segments = []
+            right_segments = []
+            
+            left_divider_idx = i % len(lane_divider_tokens)
+            right_divider_idx = (i + 1) % len(lane_divider_tokens)
+            
+            for seg in lane_dividers[left_divider_idx]["lane_divider_segments"]:
+                left_segments.append({
+                    "node_token": seg["node_token"],
+                    "segment_type": seg["segment_type"]
+                })
+            
+            for seg in lane_dividers[right_divider_idx]["lane_divider_segments"]:
+                right_segments.append({
+                    "node_token": seg["node_token"],
+                    "segment_type": seg["segment_type"]
+                })
+            
+            lanes.append({
+                "token": token,
+                "polygon_token": poly_tokens[i % len(poly_tokens)],
+                "lane_type": "CAR",
+                "from_edge_line_token": line_tokens[i % len(line_tokens)],
+                "to_edge_line_token": line_tokens[(i + 1) % len(line_tokens)],
+                "left_lane_divider_segments": left_segments,
+                "right_lane_divider_segments": right_segments
+            })
+        
+        road_segment_tokens = [uuid.uuid4().hex for _ in range(5)]
+        road_segments = []
+        for i, token in enumerate(road_segment_tokens):
+            road_segments.append({
+                "token": token,
+                "polygon_token": poly_tokens[i % len(poly_tokens)],
+                "is_intersection": i == 0,
+                "lane_tokens": [lane_tokens[i % len(lane_tokens)], lane_tokens[(i+1) % len(lane_tokens)]]
+            })
+        
+        road_block_tokens = [uuid.uuid4().hex for _ in range(5)]
+        road_blocks = []
+        for i, token in enumerate(road_block_tokens):
+            road_blocks.append({
+                "token": token,
+                "polygon_token": poly_tokens[i % len(poly_tokens)],
+                "interior_node_tokens": []
+            })
+        
+        drivable_area_tokens = [uuid.uuid4().hex for _ in range(4)]
+        drivable_areas = []
+        for i, token in enumerate(drivable_area_tokens):
+            drivable_areas.append({
+                "token": token,
+                "polygon_token": poly_tokens[i % len(poly_tokens)],
+                "road_segment_token": road_segment_tokens[i % len(road_segment_tokens)]
+            })
+        
+        traffic_controls = []
+        colors = ["RED", "YELLOW", "GREEN"]
+        for i in range(3):
+            tc_line_token = line_tokens[(i+7) % len(line_tokens)]
+            items = []
+            for color in colors:
+                items.append({
+                    "color": color,
+                    "shape": "CIRCLE",
+                    "rel_pos": {
+                        "tx": 0.0,
+                        "ty": 0.0,
+                        "tz": 0.762 + i * 0.5,
+                        "rx": 0.0,
+                        "ry": 0.0,
+                        "rz": 0.0
+                    },
+                    "to_road_block_tokens": []
+                })
+            
+            traffic_controls.append({
+                "token": uuid.uuid4().hex,
+                "line_token": tc_line_token,
+                "traffic_light_type": "VERTICAL",
+                "from_road_block_token": road_block_tokens[i % len(road_block_tokens)],
+                "items": items
+            })
+        
+        connectivity = {}
+        for i in range(min(5, len(lane_tokens))):
+            lane_token = lane_tokens[i]
+            incoming = [lane_tokens[(i-1) % len(lane_tokens)]] if i > 0 else []
+            outgoing = [lane_tokens[(i+1) % len(lane_tokens)], lane_tokens[(i+2) % len(lane_tokens)]] if i < len(lane_tokens) - 1 else []
+            connectivity[lane_token] = {
+                "incoming": incoming,
+                "outgoing": outgoing
+            }
+        
+        ped_crossings = []
+        for i in range(3):
+            ped_crossings.append({
+                "token": uuid.uuid4().hex,
+                "polygon_token": poly_tokens[i % len(poly_tokens)]
+            })
+        
+        walkways = []
+        for i in range(2):
+            walkways.append({
+                "token": uuid.uuid4().hex,
+                "polygon_token": poly_tokens[(i+3) % len(poly_tokens)]
+            })
+        
+        stop_lines = []
+        for i in range(3):
+            stop_lines.append({
+                "token": uuid.uuid4().hex,
+                "line_token": line_tokens[i % len(line_tokens)],
+                "from_road_block_token": road_block_tokens[i % len(road_block_tokens)]
+            })
+        
+        carpark_areas = []
+        for i in range(2):
+            carpark_areas.append({
+                "token": uuid.uuid4().hex,
+                "polygon_token": poly_tokens[(i+4) % len(poly_tokens)]
+            })
+        
+        road_dividers = []
+        for i in range(2):
+            segments = []
+            for j in range(4):
+                node_idx = (i * 4 + j + 50) % len(node_tokens)
+                segments.append({
+                    "node_token": node_tokens[node_idx],
+                    "segment_type": "SOLID_SINGLE_WHITE"
+                })
+            road_dividers.append({
+                "token": uuid.uuid4().hex,
+                "line_token": line_tokens[(i+5) % len(line_tokens)],
+                "road_divider_segments": segments
+            })
+        
+        traffic_lights = []
+        for i in range(2):
+            traffic_lights.append({
+                "token": uuid.uuid4().hex,
+                "line_token": line_tokens[(i+8) % len(line_tokens)],
+                "traffic_light_type": "VERTICAL"
+            })
+        
+        lane_connectors = []
+        for i in range(3):
+            lane_connectors.append({
+                "token": uuid.uuid4().hex,
+                "from_lane_token": lane_tokens[i % len(lane_tokens)],
+                "to_lane_token": lane_tokens[(i+1) % len(lane_tokens)],
+                "polygon_token": poly_tokens[i % len(poly_tokens)]
+            })
+        
+        arcline_path_3 = {}
+        for lane_token in lane_tokens[:5]:
+            arcline_path_3[lane_token] = [
+                {
+                    "start_pose": [1000.0 + i * 10, 1500.0 + i * 5, 0.0],
+                    "end_pose": [1010.0 + i * 10, 1505.0 + i * 5, 0.1],
+                    "shape": "LSL",
+                    "radius": 5.0,
+                    "segment_length": [2.5, 10.0, 2.5]
+                }
+                for i in range(3)
+            ]
         
         stub_data = {
+            "version": "1.3",
+            "canvas_edge": [0.0, 0.0, 5000.0, 5000.0],
             "polygon": polygons,
             "node": nodes,
-            "lane": [],
-            "lane_divider_segment": [],
-            "road_segment": [],
-            "drivable_area": [],
-            "traffic_control": []
+            "line": lines,
+            "lane": lanes,
+            "lane_divider": lane_dividers,
+            "road_segment": road_segments,
+            "road_block": road_blocks,
+            "drivable_area": drivable_areas,
+            "ped_crossing": ped_crossings,
+            "walkway": walkways,
+            "stop_line": stop_lines,
+            "carpark_area": carpark_areas,
+            "road_divider": road_dividers,
+            "traffic_light": traffic_lights,
+            "traffic_control": traffic_controls,
+            "lane_connector": lane_connectors,
+            "connectivity": connectivity,
+            "arcline_path_3": arcline_path_3
         }
         
         save_json_safely(expansion_path, stub_data)
-        log.info(f"Created stub map expansion file")
+        log.info(f"Created map expansion file")
     
     def _write_prediction(self, scenes, samples):
-        """Writes prediction.json."""
+        """Writes prediction.json with correct token format."""
         if not scenes or not samples:
             return
         
         prediction_path = os.path.join(self._map_expansion_dir, 'prediction', 'prediction.json')
-        
         prediction_data = load_json_safely(prediction_path, default={})
         
         raw_scene_name = scenes[0].name
         formatted_scene_name = self._format_scene_name(raw_scene_name)
         
-        first_sample = min(samples, key=lambda x: x.timestamp_us)
-        first_sample_token = self._token_manager.get_frame_token(first_sample.temp_frame_id)
+        sorted_samples = sorted(samples, key=lambda x: x.timestamp_us)
         
-        stubbed_predictions = []
-        for _ in range(3):
-            prediction_id = uuid.uuid4().hex
-            stubbed_predictions.append(f"{prediction_id}_{first_sample_token}")
+        prediction_id = uuid.uuid4().hex
+        predictions = []
         
-        prediction_data[formatted_scene_name] = stubbed_predictions
+        for sample in sorted_samples[:20]:
+            sample_token = self._token_manager.get_frame_token(sample.temp_frame_id)
+            predictions.append(f"{prediction_id}_{sample_token}")
+        
+        prediction_data[formatted_scene_name] = predictions
         
         save_json_safely(prediction_path, prediction_data)
         log.info(f"Merged scene '{formatted_scene_name}' into prediction.json")

@@ -314,17 +314,15 @@ class NuScenesWriter(BaseWriter):
             dy = 0.15518170334
             
             for i, sample in enumerate(scene_samples):
-                # MS_IMU [cite: 4, 6]
                 ms_imu_data.append({
                     "utime": sample.timestamp_us,
-                    "linear_accel": [3.379, 3.379, 3.379], # Mean value
-                    "q": [0.5, 0.5, 0.5, 0.5], # Placeholder
+                    "linear_accel": [3.379, 3.379, 3.379],
+                    "q": [0.5, 0.5, 0.5, 0.5],
                     "rotation_rate": [0.044, 0.001, 0.282]
                 })
                 
-                # POSE [cite: 8, 10]
                 pose_data.append({
-                    "accel": [3.379, 3.379, 3.379], # Mean value
+                    "accel": [3.379, 3.379, 3.379],
                     "orientation": [0.7479305678167669, 0.0, 0.0, 0.663776],
                     "pos": [1010.1436201720262, 610.8882352282457, 0.0],
                     "rotation_rate": [0.040320225059986115, -0.002563952235504985, 0.28492140769958496],
@@ -334,13 +332,11 @@ class NuScenesWriter(BaseWriter):
                 
                 route_data.append([base_x + i * dx, base_y + i * dy])
                 
-                # SteerAngleFeedback [cite: 14]
                 steer_data.append({
                     "utime": sample.timestamp_us,
-                    "value": 3.379 # Same as linear_accel per plan
+                    "value": 3.379
                 })
                 
-                # VehicleMonitor [cite: 16, 18, 20, 23, 24, 27, 29, 31, 33, 36, 38, 40, 42, 44]
                 vehicle_monitor_data.append({
                     "available_distance": 100.0,
                     "battery_level": 100.0,
@@ -359,7 +355,6 @@ class NuScenesWriter(BaseWriter):
                     "yaw_rate": 0.105
                 })
                 
-                # ZoeSensors [cite: 70, 72, 74]
                 zoesensors_data.append({
                     "brake_sensor": 0.172,
                     "steering_sensor": 0.188,
@@ -367,7 +362,6 @@ class NuScenesWriter(BaseWriter):
                     "utime": sample.timestamp_us
                 })
                 
-                # ZOE_VEH_INFO [cite: 47, 50, 52, 54, 57, 59, 61, 64, 66]
                 zoe_veh_data.append({
                     "FL_wheel_speed": 166.90,
                     "FR_wheel_speed": 166.90,
@@ -388,8 +382,7 @@ class NuScenesWriter(BaseWriter):
                     "transversal_accel": -0.49,
                     "utime": sample.timestamp_us
                 })
-                
-            # Save all 8 files for this scene
+            
             save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_ms_imu.json"), ms_imu_data)
             save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_pose.json"), pose_data)
             save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_route.json"), route_data)
@@ -398,11 +391,90 @@ class NuScenesWriter(BaseWriter):
             save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_zoesensors.json"), zoesensors_data)
             save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_zoe_veh.json"), zoe_veh_data)
             
+            first_ts = scene_samples[0].timestamp_us
+            last_ts = scene_samples[-1].timestamp_us
+            count = len(scene_samples)
+            
             meta_data = {
-                "scene_name": formatted_scene_name,
-                "num_samples": len(scene_samples),
-                "first_timestamp": scene_samples[0].timestamp_us,
-                "last_timestamp": scene_samples[-1].timestamp_us
+                "MS_IMU": {
+                    "message_count": count, "message_frequency": count/10.0, "timespan": 10.0,
+                    "var_stats": {
+                        "linear_accel": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87},
+                        "q": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87},
+                        "rotation_rate": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87},
+                        "utime": {"max": last_ts, "max_diff": 40353.0, "mean": (first_ts+last_ts)/2, "mean_diff": 10298.1, "min": first_ts, "min_diff": 2620.0, "std": 5648567.4, "std_diff": 2102.8}
+                    }
+                },
+                "POSE": {
+                    "message_count": count, "message_frequency": count/10.0, "timespan": 10.0,
+                    "var_stats": {
+                        "accel": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87},
+                        "orientation": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87},
+                        "pos": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87},
+                        "rotation_rate": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87},
+                        "utime": {"max": last_ts, "max_diff": 40353.0, "mean": (first_ts+last_ts)/2, "mean_diff": 10298.1, "min": first_ts, "min_diff": 2620.0, "std": 5648567.4, "std_diff": 2102.8},
+                        "vel": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87}
+                    }
+                },
+                "SteerAngleFeedback": {
+                    "message_count": count, "message_frequency": count/10.0, "timespan": 10.0,
+                    "var_stats": {
+                        "utime": {"max": last_ts, "max_diff": 40353.0, "mean": (first_ts+last_ts)/2, "mean_diff": 10298.1, "min": first_ts, "min_diff": 2620.0, "std": 5648567.4, "std_diff": 2102.8},
+                        "value": {"max": 10.96, "max_diff": 11.10, "mean": 3.38, "mean_diff": 4.78, "min": -0.89, "min_diff": -1.35, "std": 4.54, "std_diff": 4.87}
+                    }
+                },
+                "VehicleMonitor": {
+                    "message_count": count, "message_frequency": count/10.0, "timespan": 10.0,
+                    "var_stats": {
+                        "available_distance": {"max": 100.0, "max_diff": 0.0, "mean": 100.0, "mean_diff": 0.0, "min": 100.0, "min_diff": 0.0, "std": 0.0, "std_diff": 0.0},
+                        "battery_level": {"max": 100.0, "max_diff": 0.0, "mean": 100.0, "mean_diff": 0.0, "min": 100.0, "min_diff": 0.0, "std": 0.0, "std_diff": 0.0},
+                        "brake": {"max": 0.0, "max_diff": 0.0, "mean": 0.0, "mean_diff": 0.0, "min": 0.0, "min_diff": 0.0, "std": 0.0, "std_diff": 0.0},
+                        "brake_switch": {"max": 0, "max_diff": 0, "mean": 0.0, "mean_diff": 0.0, "min": 0, "min_diff": 0, "std": 0.0, "std_diff": 0.0},
+                        "gear_position": {"max": 5, "max_diff": 5, "mean": 3.5, "mean_diff": 2.0, "min": 2, "min_diff": 2, "std": 1.5, "std_diff": 1.58},
+                        "left_signal": {"max": 0, "max_diff": 0, "mean": 0.0, "mean_diff": 0.0, "min": 0, "min_diff": 0, "std": 0.46, "std_diff": 0.50},
+                        "rear_left_rpm": {"max": 205.37, "max_diff": 17.76, "mean": 167.58, "mean_diff": 2.25, "min": 115.68, "min_diff": -8.88, "std": 28.04, "std_diff": 6.73},
+                        "rear_right_rpm": {"max": 210.49, "max_diff": 18.35, "mean": 169.88, "mean_diff": 2.54, "min": 120.68, "min_diff": -7.88, "std": 29.04, "std_diff": 7.73},
+                        "right_signal": {"max": 1, "max_diff": 1, "mean": 0.1, "mean_diff": 0.0, "min": 0, "min_diff": 0, "std": 0.32, "std_diff": 0.39},
+                        "steering": {"max": 206.4, "max_diff": 20.0, "mean": 23.95, "mean_diff": -6.06, "min": -44.4, "min_diff": -78.2, "std": 63.95, "std_diff": 19.52},
+                        "steering_speed": {"max": 65.7, "max_diff": 67.7, "mean": -10.98, "mean_diff": -2.61, "min": -183.3, "min_diff": -123.5, "std": 40.82, "std_diff": 34.91},
+                        "throttle": {"max": 202, "max_diff": 72.0, "mean": 95.5, "mean_diff": 2.41, "min": 0, "min_diff": -98.0, "std": 65.78, "std_diff": 33.01},
+                        "utime": {"max": last_ts, "max_diff": 40353.0, "mean": (first_ts+last_ts)/2, "mean_diff": 10298.1, "min": first_ts, "min_diff": 2620.0, "std": 5648567.4, "std_diff": 2102.8},
+                        "vehicle_speed": {"max": 23.12, "max_diff": 1.19, "mean": 19.32, "mean_diff": 0.21, "min": 14.53, "min_diff": -0.96, "std": 2.96, "std_diff": 0.69},
+                        "yaw_rate": {"max": 0.175, "max_diff": 0.035, "mean": 0.105, "mean_diff": 0.005, "min": 0.035, "min_diff": -0.017, "std": 0.039, "std_diff": 0.012}
+                    }
+                },
+                "ZOE_VEH_INFO": {
+                    "message_count": count, "message_frequency": count/10.0, "timespan": 10.0,
+                    "var_stats": {
+                        "FL_wheel_speed": {"max": 202.08, "max_diff": 2.84, "mean": 166.90, "mean_diff": 0.04, "min": 118.43, "min_diff": -3.00, "std": 27.19, "std_diff": 0.48},
+                        "FR_wheel_speed": {"max": 202.08, "max_diff": 2.84, "mean": 166.90, "mean_diff": 0.04, "min": 118.43, "min_diff": -3.00, "std": 27.19, "std_diff": 0.48},
+                        "RL_wheel_speed": {"max": 202.08, "max_diff": 2.84, "mean": 166.90, "mean_diff": 0.04, "min": 118.43, "min_diff": -3.00, "std": 27.19, "std_diff": 0.48},
+                        "RR_wheel_speed": {"max": 202.08, "max_diff": 2.84, "mean": 166.90, "mean_diff": 0.04, "min": 118.43, "min_diff": -3.00, "std": 27.19, "std_diff": 0.48},
+                        "left_solar": {"max": 0, "max_diff": 112.0, "mean": -16.12, "mean_diff": 0.0, "min": -112, "min_diff": -112.0, "std": 39.32, "std_diff": 3.60},
+                        "longitudinal_accel": {"max": 3.5, "max_diff": 4.0, "mean": 0.59, "mean_diff": 0.0, "min": -4.0, "min_diff": -4.0, "std": 1.85, "std_diff": 1.53},
+                        "meanEffTorque": {"max": 73.0, "max_diff": 20.0, "mean": 91.67, "mean_diff": 2.0, "min": 50.0, "min_diff": -20.0, "std": 14.49, "std_diff": 7.62},
+                        "odom": {"max": 120, "max_diff": 64.0, "mean": 60.67, "mean_diff": 0.004, "min": 0, "min_diff": -84.0, "std": 34.79, "std_diff": 18.79},
+                        "odom_speed": {"max": 120, "max_diff": 64.0, "mean": 60.67, "mean_diff": 0.004, "min": 0, "min_diff": -84.0, "std": 34.79, "std_diff": 18.79},
+                        "pedal_cc": {"max": 273.0, "max_diff": 15.0, "mean": 136.46, "mean_diff": 0.06, "min": 0.0, "min_diff": -22.0, "std": 89.45, "std_diff": 1.98},
+                        "regen": {"max": 273.0, "max_diff": 15.0, "mean": 136.46, "mean_diff": 0.06, "min": 0.0, "min_diff": -22.0, "std": 89.45, "std_diff": 1.98},
+                        "requestedTorqueAfterProc": {"max": -272.5, "max_diff": 123.5, "mean": -338.93, "mean_diff": 0.01, "min": -398.5, "min_diff": -125.5, "std": 35.12, "std_diff": 4.06},
+                        "right_solar": {"max": 0, "max_diff": 112.0, "mean": -16.12, "mean_diff": 0.0, "min": -112, "min_diff": -112.0, "std": 39.32, "std_diff": 3.60},
+                        "steer_corrected": {"max": 206.4, "max_diff": 1.4, "mean": 27.39, "mean_diff": -0.09, "min": -28.4, "min_diff": -2.0, "std": 65.01, "std_diff": 0.46},
+                        "steer_offset_can": {"max": 206.4, "max_diff": 1.4, "mean": 27.39, "mean_diff": -0.09, "min": -28.4, "min_diff": -2.0, "std": 65.01, "std_diff": 0.46},
+                        "steer_raw": {"max": 206.4, "max_diff": 1.4, "mean": 27.39, "mean_diff": -0.09, "min": -28.4, "min_diff": -2.0, "std": 65.01, "std_diff": 0.46},
+                        "transversal_accel": {"max": -0.312, "max_diff": 0.032, "mean": -0.49, "mean_diff": 0.0, "min": -0.6, "min_diff": -0.028, "std": 0.063, "std_diff": 0.006},
+                        "utime": {"max": last_ts, "max_diff": 40353.0, "mean": (first_ts+last_ts)/2, "mean_diff": 10298.1, "min": first_ts, "min_diff": 2620.0, "std": 5648567.4, "std_diff": 2102.8}
+                    }
+                },
+                "ZoeSensors": {
+                    "message_count": count, "message_frequency": count/10.0, "timespan": 10.0,
+                    "var_stats": {
+                        "brake_sensor": {"max": 0.201, "max_diff": 0.0003, "mean": 0.172, "mean_diff": 0.0, "min": 0.171, "min_diff": -0.0004, "std": 0.005, "std_diff": 0.00002},
+                        "steering_sensor": {"max": 0.190, "max_diff": 0.0006, "mean": 0.188, "mean_diff": 0.0, "min": 0.187, "min_diff": -0.0005, "std": 0.0003, "std_diff": 0.00006},
+                        "throttle_sensor": {"max": 0.253, "max_diff": 0.0017, "mean": 0.192, "mean_diff": 0.0, "min": 0.120, "min_diff": -0.0016, "std": 0.041, "std_diff": 0.0002},
+                        "utime": {"max": last_ts, "max_diff": 24269.0, "mean": (first_ts+last_ts)/2, "mean_diff": 1050.9, "min": first_ts, "min_diff": 1.0, "std": 5626101.9, "std_diff": 837.4}
+                    }
+                }
             }
             save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_meta.json"), meta_data)
             

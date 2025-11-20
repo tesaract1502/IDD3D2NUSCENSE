@@ -1,13 +1,3 @@
-# writers.py
-# ----------------------
-# This file contains "Writer" classes.
-# Each Writer is responsible for consuming the 'IntermediateData' object
-# and writing it to a specific dataset format (like nuScenes).
-#
-# Writers handle format-specific concerns like token management,
-# file naming conventions, and directory structures.
-# ----------------------
-
 import os
 import json
 import shutil
@@ -19,35 +9,26 @@ from abc import ABC, abstractmethod
 from PIL import Image
 from datetime import datetime
 from intermediate_format import IntermediateData
-from utils import append_to_json_list, json_file_lock, merge_and_overwrite_json_list, load_json_safely, save_json_safely
+from utils import append_to_json_list, merge_and_overwrite_json_list, load_json_safely, save_json_safely
 
-# Import numpy and optional libraries
 try:
     import numpy as np
     import pyarrow.feather as pf
     import pandas as pd
 except ImportError:
-    log.warning("numpy, pyarrow or pandas not found. Argoverse LiDAR conversion will fail.")
+    pass
 
 try:
     import open3d as o3d
 except ImportError:
-    log.warning("open3d not found. IDD3D .pcd conversion will fail.")
+    pass
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 log = logging.getLogger(__name__)
 
-
-# -----------------------------------------------------------------------------
-#  FILE CONVERSION HELPERS
-# -----------------------------------------------------------------------------
-
 def convert_lidar_pcd_to_bin(src_path, dst_path):
-    """Converts a .pcd file to a .pcd.bin file."""
     try:
         if not os.path.exists(src_path):
-            log.warning(f"Source LiDAR file not found: {src_path}")
             open(dst_path, 'wb').close()
             return
         
@@ -56,16 +37,12 @@ def convert_lidar_pcd_to_bin(src_path, dst_path):
         intensity = np.zeros((xyz.shape[0], 1), dtype=np.float32)
         pts = np.hstack((xyz, intensity))
         pts.astype(np.float32).tofile(dst_path)
-    except Exception as e:
-        log.error(f"Error converting {src_path}: {e}. Creating empty file.")
+    except Exception:
         open(dst_path, 'wb').close()
 
-
 def convert_lidar_feather_to_bin(src_path, dst_path):
-    """Converts Argoverse .feather LiDAR file to .pcd.bin format."""
     try:
         if not os.path.exists(src_path):
-            log.warning(f"Source LiDAR file not found: {src_path}")
             open(dst_path, 'wb').close()
             return
         
@@ -73,80 +50,41 @@ def convert_lidar_feather_to_bin(src_path, dst_path):
         df = table.to_pandas()
         pts = df[['x', 'y', 'z', 'intensity']].values.astype(np.float32)
         pts.astype(np.float32).tofile(dst_path)
-    except Exception as e:
-        log.error(f"Error converting {src_path}: {e}. Creating empty file.")
+    except Exception:
         open(dst_path, 'wb').close()
 
-
 def convert_camera_to_jpg(src_path, dst_path, quality=95):
-    """Converts a camera image to .jpg format."""
     try:
         if not os.path.exists(src_path):
-            log.warning(f"Source camera file not found: {src_path}")
             return
         
         img = Image.open(src_path)
         if img.mode != 'RGB':
             img = img.convert('RGB')
         img.save(dst_path, 'JPEG', quality=quality)
-    except Exception as e:
-        log.error(f"Error converting {src_path} to {dst_path}: {e}")
-
-
-# -----------------------------------------------------------------------------
-#  BASE WRITER
-# -----------------------------------------------------------------------------
-
-class BaseWriter(ABC):
-    """
-    Abstract base class for all dataset writers.
-    
-    Writers should handle format-specific concerns internally,
-    including token generation, file naming, and directory structures.
-    """
-    
-    @abstractmethod
-    def write(self, data: IntermediateData, output_path: str):
-        """
-        Writes intermediate data to the target format.
-        
-        Args:
-            data: IntermediateData object to write
-            output_path: Base output directory path
-        """
+    except Exception:
         pass
 
-
-# -----------------------------------------------------------------------------
-#  NUSCENES TOKEN MANAGER (Private to NuScenesWriter)
-# -----------------------------------------------------------------------------
+class BaseWriter(ABC):
+    @abstractmethod
+    def write(self, data: IntermediateData, output_path: str):
+        pass
 
 class _NuScenesTokenManager:
-    """
-    Manages token generation for nuScenes format.
-    
-    This is a PRIVATE class used only by NuScenesWriter.
-    It handles:
-    - Local tokens (frame, instance, ego_pose) - regenerated each run
-    - Global tokens (category, sensor, etc.) - persistent across runs
-    """
     
     def __init__(self, registry_path=None, base_timestamp=None, frame_rate_hz=10):
         self.frame_rate_hz = frame_rate_hz
         self.frame_interval_us = int(1_000_000 / frame_rate_hz)
         
         if base_timestamp is None:
-            self.base_timestamp = 1640995200000000  # Jan 1, 2022
+            self.base_timestamp = 1640995200000000  
         else:
             self.base_timestamp = base_timestamp
         
-        # Local tokens (regenerated each run)
-        self.frame_tokens = {}        # temp_frame_id -> token
-        self.instance_tokens = {}     # temp_instance_id -> token
-        self.ego_pose_tokens = {}     # temp_frame_id -> ego_pose_token
+        self.frame_tokens = {}        
+        self.instance_tokens = {}     
+        self.ego_pose_tokens = {}     
         self.scene_token = None
-        
-        # Global tokens (persistent across runs)
         self.category_tokens = {}
         self.attribute_tokens = {}
         self.visibility_tokens = {}
@@ -154,19 +92,15 @@ class _NuScenesTokenManager:
         self.log_tokens = {}
         self.sensor_tokens = {}
         self.calibration_tokens = {}
-        
         self.registry_path = registry_path
         self._load_registry()
     
     def _load_registry(self):
-        """Loads ONLY global tokens from the registry."""
         if not self.registry_path or not os.path.exists(self.registry_path):
-            log.info("No existing token registry found. Starting fresh.")
             return
         
         try:
             registry = load_json_safely(self.registry_path, default={})
-            
             self.category_tokens = registry.get('category_tokens', {})
             self.attribute_tokens = registry.get('attribute_tokens', {})
             self.visibility_tokens = registry.get('visibility_tokens', {})
@@ -174,13 +108,10 @@ class _NuScenesTokenManager:
             self.log_tokens = registry.get('log_tokens', {})
             self.sensor_tokens = registry.get('sensor_tokens', {})
             self.calibration_tokens = registry.get('calibration_tokens', {})
-            
-            log.info(f"Loaded {len(self.category_tokens)} global category tokens from registry.")
-        except Exception as e:
-            log.warning(f"Could not load token registry: {e}")
+        except Exception:
+            pass
     
     def save_registry(self):
-        """Saves ONLY global tokens to the registry."""
         if not self.registry_path:
             return
         
@@ -195,105 +126,63 @@ class _NuScenesTokenManager:
             'sensor_tokens': self.sensor_tokens,
             'calibration_tokens': self.calibration_tokens
         }
-        
         save_json_safely(self.registry_path, registry)
-        log.info(f"Global token registry saved to {self.registry_path}")
-    
-    def get_timestamp(self, frame_index):
-        """Generates a timestamp based on frame index."""
-        return self.base_timestamp + (frame_index * self.frame_interval_us)
     
     def get_frame_token(self, frame_id):
-        """Gets a deterministic token for a temp_frame_id."""
         if frame_id not in self.frame_tokens:
             self.frame_tokens[frame_id] = uuid.uuid4().hex
         return self.frame_tokens[frame_id]
     
     def get_ego_pose_token(self, frame_id):
-        """Generates a deterministic ego_pose token for this frame_id."""
         if frame_id not in self.ego_pose_tokens:
             self.ego_pose_tokens[frame_id] = uuid.uuid4().hex
         return self.ego_pose_tokens[frame_id]
     
     def get_instance_token(self, obj_id):
-        """Gets a deterministic token for a temp_instance_id."""
         if obj_id not in self.instance_tokens:
             self.instance_tokens[obj_id] = uuid.uuid4().hex
         return self.instance_tokens[obj_id]
     
     def get_category_token(self, category_name):
-        """Gets/creates a global token for an object CATEGORY."""
         if category_name not in self.category_tokens:
             self.category_tokens[category_name] = uuid.uuid4().hex
         return self.category_tokens[category_name]
     
     def get_attribute_token(self, attr_name):
-        """Gets/creates a global token for an ATTRIBUTE."""
         if attr_name not in self.attribute_tokens:
             self.attribute_tokens[attr_name] = uuid.uuid4().hex
         return self.attribute_tokens[attr_name]
     
-    def get_visibility_token(self, vis_level):
-        """Gets/creates a global token for a VISIBILITY level."""
-        if vis_level not in self.visibility_tokens:
-            self.visibility_tokens[vis_level] = uuid.uuid4().hex
-        return self.visibility_tokens[vis_level]
-    
     def get_map_token(self, map_name):
-        """Gets/creates a global token for a MAP."""
         if map_name not in self.map_tokens:
             self.map_tokens[map_name] = uuid.uuid4().hex
         return self.map_tokens[map_name]
     
     def get_log_token(self, log_name):
-        """Gets/creates a global token for a LOG."""
         if log_name not in self.log_tokens:
             self.log_tokens[log_name] = uuid.uuid4().hex
         return self.log_tokens[log_name]
     
     def get_sensor_token(self, sensor_name):
-        """Gets/creates a global token for a sensor name."""
         if sensor_name not in self.sensor_tokens:
             self.sensor_tokens[sensor_name] = uuid.uuid4().hex
         return self.sensor_tokens[sensor_name]
     
     def get_calibration_token(self, sensor_name):
-        """Gets/creates a global token for a calibration profile."""
         if sensor_name not in self.calibration_tokens:
             self.calibration_tokens[sensor_name] = uuid.uuid4().hex
         return self.calibration_tokens[sensor_name]
     
     def get_scene_token(self):
-        """Gets/creates a token for the current scene."""
         if self.scene_token is None:
             self.scene_token = uuid.uuid4().hex
         return self.scene_token
     
     def generate_annotation_token(self):
-        """Annotations are always unique."""
         return uuid.uuid4().hex
 
-
-# -----------------------------------------------------------------------------
-#  NUSCENES WRITER
-# -----------------------------------------------------------------------------
-
 class NuScenesWriter(BaseWriter):
-    """
-    Writes data to the nuScenes dataset format.
-    
-    NOTE: This writer is STATEFUL and designed to merge multiple 
-    sequences into a single output dataset. Do not reuse the same 
-    writer instance for separate output datasets.
-    
-    The writer handles:
-    - Token generation and persistence (via _NuScenesTokenManager)
-    - JSON metadata file generation
-    - Physical file conversion and copying
-    - Cross-sequence linking and merging
-    """
-    
-    # Official category tokens from category2.json
+
     OFFICIAL_CATEGORY_TOKENS = {
         "vehicle.motorcycle": "dc39d8b2858e4bc0b7ddf66ede8d734e",
         "movable_object.bicyclerider": "d411b4e8157d445193034d6f408900d3",
@@ -312,7 +201,6 @@ class NuScenesWriter(BaseWriter):
     }
     
     def __init__(self):
-        """Initialize the writer with clean state."""
         self._token_manager = None
         self._output_path = None
         self._annot_dir = None
@@ -320,36 +208,27 @@ class NuScenesWriter(BaseWriter):
         self._sweeps_dir = None
         self._maps_dir = None
         self._map_expansion_dir = None
-        
-        # Cross-run state
+        self._can_bus_dir = None
         self._generated_log_tokens = []
     
     def write(self, data: IntermediateData, output_path: str):
-        """
-        Writes intermediate data to nuScenes format.
-        
-        Args:
-            data: IntermediateData object containing sequence data
-            output_path: Base output directory path
-        """
-        log.info(f"Initializing NuScenesWriter for output to: {output_path}")
         self._output_path = os.path.abspath(output_path)
         
-        # --- 1. Setup Output Directories ---
         self._annot_dir = os.path.join(self._output_path, 'anotations')
         self._samples_dir = os.path.join(self._output_path, 'samples')
         self._sweeps_dir = os.path.join(self._output_path, 'sweeps')
         self._maps_dir = os.path.join(self._output_path, 'maps')
         self._map_expansion_dir = os.path.join(self._output_path, 'idd3d_map_expansion')
+        self._can_bus_dir = os.path.join(self._output_path, 'can_bus')
         
         os.makedirs(self._annot_dir, exist_ok=True)
         os.makedirs(self._samples_dir, exist_ok=True)
         os.makedirs(self._maps_dir, exist_ok=True)
+        os.makedirs(self._can_bus_dir, exist_ok=True)
         os.makedirs(os.path.join(self._map_expansion_dir, 'basemap'), exist_ok=True)
         os.makedirs(os.path.join(self._map_expansion_dir, 'expansion'), exist_ok=True)
         os.makedirs(os.path.join(self._map_expansion_dir, 'prediction'), exist_ok=True)
         
-        # --- 2. Initialize Token Manager ---
         registry_path = os.path.join(self._annot_dir, 'token_registry.json')
         last_timestamp = self._get_last_timestamp()
         new_base_timestamp = (last_timestamp + 20_000_000) if last_timestamp else None
@@ -359,19 +238,12 @@ class NuScenesWriter(BaseWriter):
             base_timestamp=new_base_timestamp
         )
         
-        # Pre-populate official category tokens
         self._pre_populate_categories()
         
-        # Validate data
         if not data.scenes:
-            log.error("No scenes found in intermediate data. Cannot proceed.")
             return
         
         sequence_name = data.scenes[0].name
-        log.info(f"Processing sequence: {sequence_name}")
-        
-        # --- 3. Write JSON Metadata Files ---
-        log.info("Writing JSON metadata files...")
         
         self._write_sensor_and_calib(data.calibrations)
         self._write_visibility()
@@ -385,61 +257,158 @@ class NuScenesWriter(BaseWriter):
         self._write_sample_data(data.sensor_data, sequence_name)
         self._write_category(data.instances)
         self._write_instance_and_annotation(data.instances, data.annotations)
+        self._write_can_bus(data.scenes, data.samples)
         
-        # --- 4. Process Physical Files ---
-        log.info("Converting and copying physical sensor files...")
         self._process_sensor_files(data.sensor_data, data.sequence_path, sequence_name)
-        
-        # --- 5. Duplicate Sweeps ---
-        log.info("Duplicating 'samples' directory to 'sweeps'...")
         self._duplicate_sweeps()
-        
-        # --- 6. Save Token Registry ---
-        log.info("Saving global token registry...")
         self._token_manager.save_registry()
-        
-        log.info("=" * 50)
-        log.info("NuScenes Write Complete")
-        log.info("=" * 50)
-        log.info(f"Output: {self._output_path}")
-        log.info("=" * 50)
     
     def _get_last_timestamp(self):
-        """Gets the last timestamp from existing sample.json."""
         sample_json_path = os.path.join(self._annot_dir, 'sample.json')
         if not os.path.exists(sample_json_path):
             return None
-        
         samples = load_json_safely(sample_json_path, default=[])
         if samples and isinstance(samples, list):
             return samples[-1].get('timestamp')
         return None
     
     def _pre_populate_categories(self):
-        """Injects official category tokens into the token manager."""
-        log.info("Pre-populating TokenManager with official category tokens...")
-        
         for cat_name, cat_token in self.OFFICIAL_CATEGORY_TOKENS.items():
             if cat_name not in self._token_manager.category_tokens:
                 self._token_manager.category_tokens[cat_name] = cat_token
-        
-        log.info(f"Injected {len(self.OFFICIAL_CATEGORY_TOKENS)} official category tokens.")
     
     def _format_scene_name(self, raw_scene_name: str) -> str:
-        """Converts a sequence name to nuScenes 'scene-NNNN' format."""
         match = re.search(r'\d+$', raw_scene_name)
         if match:
             num_str = match.group(0)
-            return f"scene-{num_str.zfill(4)}"
+            return f"scene-{num_str.zfill(3)}"
         else:
-            fallback_hash = hashlib.md5(raw_scene_name.encode()).hexdigest()[:4]
-            log.warning(f"Could not parse number from '{raw_scene_name}'. Using 'scene-{fallback_hash}'")
+            fallback_hash = hashlib.md5(raw_scene_name.encode()).hexdigest()[:3]
             return f"scene-{fallback_hash}"
     
-    # --- JSON Writing Methods ---
-    
+    def _write_can_bus(self, scenes, samples):
+        if not scenes or not samples:
+            return
+        
+        for scene in scenes:
+            raw_scene_name = scene.name
+            formatted_scene_name = self._format_scene_name(raw_scene_name)
+            
+            scene_samples = [s for s in samples if s.scene_name == raw_scene_name]
+            if not scene_samples:
+                continue
+            
+            scene_samples.sort(key=lambda x: x.timestamp_us)
+            
+            ms_imu_data = []
+            pose_data = []
+            route_data = []
+            steer_data = []
+            vehicle_monitor_data = []
+            zoesensors_data = []
+            zoe_veh_data = []
+            
+            base_x = 983.0155677603801
+            base_y = 569.4627572428807
+            dx = 0.12616908872
+            dy = 0.15518170334
+            
+            for i, sample in enumerate(scene_samples):
+                # MS_IMU [cite: 4, 6]
+                ms_imu_data.append({
+                    "utime": sample.timestamp_us,
+                    "linear_accel": [3.379, 3.379, 3.379], # Mean value
+                    "q": [0.5, 0.5, 0.5, 0.5], # Placeholder
+                    "rotation_rate": [0.044, 0.001, 0.282]
+                })
+                
+                # POSE [cite: 8, 10]
+                pose_data.append({
+                    "accel": [3.379, 3.379, 3.379], # Mean value
+                    "orientation": [0.7479305678167669, 0.0, 0.0, 0.663776],
+                    "pos": [1010.1436201720262, 610.8882352282457, 0.0],
+                    "rotation_rate": [0.040320225059986115, -0.002563952235504985, 0.28492140769958496],
+                    "utime": sample.timestamp_us,
+                    "vel": [4.1688763951334185, 0.0, 0.0]
+                })
+                
+                route_data.append([base_x + i * dx, base_y + i * dy])
+                
+                # SteerAngleFeedback [cite: 14]
+                steer_data.append({
+                    "utime": sample.timestamp_us,
+                    "value": 3.379 # Same as linear_accel per plan
+                })
+                
+                # VehicleMonitor [cite: 16, 18, 20, 23, 24, 27, 29, 31, 33, 36, 38, 40, 42, 44]
+                vehicle_monitor_data.append({
+                    "available_distance": 100.0,
+                    "battery_level": 100.0,
+                    "brake": 0.0,
+                    "brake_switch": 0,
+                    "gear_position": 4,
+                    "left_signal": 0,
+                    "rear_left_rpm": 167.58,
+                    "rear_right_rpm": 169.88,
+                    "right_signal": 0,
+                    "steering": 23.95,
+                    "steering_speed": -10.98,
+                    "throttle": 95.5,
+                    "utime": sample.timestamp_us,
+                    "vehicle_speed": 19.32,
+                    "yaw_rate": 0.105
+                })
+                
+                # ZoeSensors [cite: 70, 72, 74]
+                zoesensors_data.append({
+                    "brake_sensor": 0.172,
+                    "steering_sensor": 0.188,
+                    "throttle_sensor": 0.192,
+                    "utime": sample.timestamp_us
+                })
+                
+                # ZOE_VEH_INFO [cite: 47, 50, 52, 54, 57, 59, 61, 64, 66]
+                zoe_veh_data.append({
+                    "FL_wheel_speed": 166.90,
+                    "FR_wheel_speed": 166.90,
+                    "RL_wheel_speed": 166.90,
+                    "RR_wheel_speed": 166.90,
+                    "left_solar": -16.12,
+                    "longitudinal_accel": 0.59,
+                    "meanEffTorque": 91.67,
+                    "odom": 60.67,
+                    "odom_speed": 60.67,
+                    "pedal_cc": 136.46,
+                    "regen": 136.46,
+                    "requestedTorqueAfterProc": -338.93,
+                    "right_solar": -16.12,
+                    "steer_corrected": 27.39,
+                    "steer_offset_can": 27.39,
+                    "steer_raw": 27.39,
+                    "transversal_accel": -0.49,
+                    "utime": sample.timestamp_us
+                })
+                
+            # Save all 8 files for this scene
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_ms_imu.json"), ms_imu_data)
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_pose.json"), pose_data)
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_route.json"), route_data)
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_steeranglefeedback.json"), steer_data)
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_vehicle_monitor.json"), vehicle_monitor_data)
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_zoesensors.json"), zoesensors_data)
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_zoe_veh.json"), zoe_veh_data)
+            
+            meta_data = {
+                "scene_name": formatted_scene_name,
+                "num_samples": len(scene_samples),
+                "first_timestamp": scene_samples[0].timestamp_us,
+                "last_timestamp": scene_samples[-1].timestamp_us
+            }
+            save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_meta.json"), meta_data)
+            
+            log.info(f"Generated CAN bus files for {formatted_scene_name}")
+        
     def _write_sensor_and_calib(self, calibrations):
-        """Writes sensor.json and calibrated_sensor.json."""
         new_sensors = []
         new_calib_sensors = []
         
@@ -461,41 +430,19 @@ class NuScenesWriter(BaseWriter):
                 "camera_intrinsic": if_calib.camera_intrinsic
             })
         
-        merge_and_overwrite_json_list(
-            os.path.join(self._annot_dir, 'sensor.json'),
-            new_sensors,
-            key_field='channel'
-        )
-        merge_and_overwrite_json_list(
-            os.path.join(self._annot_dir, 'calibrated_sensor.json'),
-            new_calib_sensors,
-            key_field='sensor_token'
-        )
+        merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'sensor.json'), new_sensors, key_field='channel')
+        merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'calibrated_sensor.json'), new_calib_sensors, key_field='sensor_token')
     
     def _write_visibility(self):
-        """Writes visibility.json."""
         vis_levels = [
-            {"level": "v1-0", "description": "visibility 0-40%"},
-            {"level": "v2-0", "description": "visibility 40-60%"},
-            {"level": "v3-0", "description": "visibility 60-80%"},
-            {"level": "v4-0", "description": "visibility 80-100%"}
+            {"token": "1", "level": "v1-0", "description": "visibility 0-40%"},
+            {"token": "2", "level": "v2-0", "description": "visibility 40-60%"},
+            {"token": "3", "level": "v3-0", "description": "visibility 60-80%"},
+            {"token": "4", "level": "v4-0", "description": "visibility 80-100%"}
         ]
-        new_entries = []
-        for vis in vis_levels:
-            new_entries.append({
-                "token": self._token_manager.get_visibility_token(vis["level"]),
-                "level": vis["level"],
-                "description": vis["description"]
-            })
-        
-        merge_and_overwrite_json_list(
-            os.path.join(self._annot_dir, 'visibility.json'),
-            new_entries,
-            key_field='level'
-        )
+        merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'visibility.json'), vis_levels, key_field='level')
     
     def _write_attribute(self):
-        """Writes attribute.json."""
         attributes = [
             {"name": "vehicle.moving", "description": "Vehicle is moving"},
             {"name": "pedestrian.moving", "description": "Pedestrian is moving"},
@@ -507,85 +454,41 @@ class NuScenesWriter(BaseWriter):
                 "name": attr["name"],
                 "description": attr["description"]
             })
-        
-        merge_and_overwrite_json_list(
-            os.path.join(self._annot_dir, 'attribute.json'),
-            new_entries,
-            key_field='name'
-        )
+        merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'attribute.json'), new_entries, key_field='name')
     
     def _write_log(self, scenes):
-        """Writes log.json."""
         new_entries = []
         for if_scene in scenes:
             logfile = f"{if_scene.name}-{datetime.now().strftime('%Y-%m-%d')}"
             log_token = self._token_manager.get_log_token(f"log_{logfile}")
-            
             self._generated_log_tokens.append(log_token)
-            
             new_entries.append({
                 "token": log_token,
                 "logfile": logfile,
                 "vehicle": "stub_vehicle",
                 "date_captured": datetime.now().strftime('%Y-%m-%d'),
-                "location": "Hyderabad"
+                "location": "hyderabad"
             })
-        
-        merge_and_overwrite_json_list(
-            os.path.join(self._annot_dir, 'log.json'),
-            new_entries,
-            key_field='token'
-        )
+        merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'log.json'), new_entries, key_field='token')
     
     def _write_map(self):
-        """Writes map.json and creates map image."""
         location = "Hyderabad"
-        map_filename = f"maps/{location.lower()}.png"
         map_token = self._token_manager.get_map_token(f"map_{location}")
-        
         new_map_entry = {
             "token": map_token,
             "log_tokens": self._generated_log_tokens,
             "category": "semantic_prior",
-            "filename": map_filename,
+            "filename": f"maps/{location.lower()}.png",
         }
+        merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'map.json'), [new_map_entry], key_field='token')
         
-        merge_and_overwrite_json_list(
-            os.path.join(self._annot_dir, 'map.json'),
-            [new_map_entry],
-            key_field='token'
-        )
-        
-        # Create dummy map image
-        image_path = os.path.join(self._maps_dir, f"{location.lower()}.png")
-        if not os.path.exists(image_path):
-            try:
-                img = Image.new('RGB', (10, 10), color='black')
-                img.save(image_path, 'PNG')
-                log.info(f"Created dummy map file: {image_path}")
-            except Exception as e:
-                log.error(f"Could not create dummy map image: {e}")
-        
-        # Copy to basemap folder
-        basemap_path = os.path.join(self._map_expansion_dir, 'basemap', f"{location.lower()}.png")
-        if not os.path.exists(basemap_path):
-            try:
-                shutil.copyfile(image_path, basemap_path)
-            except Exception as e:
-                log.error(f"Could not copy basemap image: {e}")
-    
     def _write_map_expansion(self):
-        """Creates map expansion file matching nuScenes format."""
         expansion_path = os.path.join(self._map_expansion_dir, 'expansion', 'singapore-queenstown.json')
         
         node_tokens = [uuid.uuid4().hex for _ in range(100)]
         nodes = []
         for i, token in enumerate(node_tokens):
-            nodes.append({
-                "token": token,
-                "x": 1000.0 + i * 50.0,
-                "y": 1500.0 + i * 30.0
-            })
+            nodes.append({"token": token, "x": 1000.0 + i * 50.0, "y": 1500.0 + i * 30.0})
         
         poly_tokens = [uuid.uuid4().hex for _ in range(6)]
         polygons = []
@@ -631,21 +534,14 @@ class NuScenesWriter(BaseWriter):
         for i, token in enumerate(lane_tokens):
             left_segments = []
             right_segments = []
-            
             left_divider_idx = i % len(lane_divider_tokens)
             right_divider_idx = (i + 1) % len(lane_divider_tokens)
             
             for seg in lane_dividers[left_divider_idx]["lane_divider_segments"]:
-                left_segments.append({
-                    "node_token": seg["node_token"],
-                    "segment_type": seg["segment_type"]
-                })
+                left_segments.append({"node_token": seg["node_token"], "segment_type": seg["segment_type"]})
             
             for seg in lane_dividers[right_divider_idx]["lane_divider_segments"]:
-                right_segments.append({
-                    "node_token": seg["node_token"],
-                    "segment_type": seg["segment_type"]
-                })
+                right_segments.append({"node_token": seg["node_token"], "segment_type": seg["segment_type"]})
             
             lanes.append({
                 "token": token,
@@ -673,7 +569,9 @@ class NuScenesWriter(BaseWriter):
             road_blocks.append({
                 "token": token,
                 "polygon_token": poly_tokens[i % len(poly_tokens)],
-                "interior_node_tokens": []
+                "from_edge_line_token": line_tokens[i % len(line_tokens)],
+                "to_edge_line_token": line_tokens[(i + 1) % len(line_tokens)],
+                "road_segment_token": road_segment_tokens[i % len(road_segment_tokens)]
             })
         
         drivable_area_tokens = [uuid.uuid4().hex for _ in range(4)]
@@ -681,36 +579,7 @@ class NuScenesWriter(BaseWriter):
         for i, token in enumerate(drivable_area_tokens):
             drivable_areas.append({
                 "token": token,
-                "polygon_token": poly_tokens[i % len(poly_tokens)],
-                "road_segment_token": road_segment_tokens[i % len(road_segment_tokens)]
-            })
-        
-        traffic_controls = []
-        colors = ["RED", "YELLOW", "GREEN"]
-        for i in range(3):
-            tc_line_token = line_tokens[(i+7) % len(line_tokens)]
-            items = []
-            for color in colors:
-                items.append({
-                    "color": color,
-                    "shape": "CIRCLE",
-                    "rel_pos": {
-                        "tx": 0.0,
-                        "ty": 0.0,
-                        "tz": 0.762 + i * 0.5,
-                        "rx": 0.0,
-                        "ry": 0.0,
-                        "rz": 0.0
-                    },
-                    "to_road_block_tokens": []
-                })
-            
-            traffic_controls.append({
-                "token": uuid.uuid4().hex,
-                "line_token": tc_line_token,
-                "traffic_light_type": "VERTICAL",
-                "from_road_block_token": road_block_tokens[i % len(road_block_tokens)],
-                "items": items
+                "polygon_token": poly_tokens[i % len(poly_tokens)]
             })
         
         connectivity = {}
@@ -718,16 +587,14 @@ class NuScenesWriter(BaseWriter):
             lane_token = lane_tokens[i]
             incoming = [lane_tokens[(i-1) % len(lane_tokens)]] if i > 0 else []
             outgoing = [lane_tokens[(i+1) % len(lane_tokens)], lane_tokens[(i+2) % len(lane_tokens)]] if i < len(lane_tokens) - 1 else []
-            connectivity[lane_token] = {
-                "incoming": incoming,
-                "outgoing": outgoing
-            }
+            connectivity[lane_token] = {"incoming": incoming, "outgoing": outgoing}
         
         ped_crossings = []
         for i in range(3):
             ped_crossings.append({
                 "token": uuid.uuid4().hex,
-                "polygon_token": poly_tokens[i % len(poly_tokens)]
+                "polygon_token": poly_tokens[i % len(poly_tokens)],
+                "road_segment_token": None
             })
         
         walkways = []
@@ -737,50 +604,47 @@ class NuScenesWriter(BaseWriter):
                 "polygon_token": poly_tokens[(i+3) % len(poly_tokens)]
             })
         
+        traffic_light_tokens = [uuid.uuid4().hex for _ in range(3)]
+        traffic_lights = []
+        for i, token in enumerate(traffic_light_tokens):
+            traffic_lights.append({
+                "token": token,
+                "line_token": line_tokens[(i+8) % len(line_tokens)],
+                "traffic_light_type": "VERTICAL"
+            })
+        
         stop_lines = []
         for i in range(3):
             stop_lines.append({
                 "token": uuid.uuid4().hex,
-                "line_token": line_tokens[i % len(line_tokens)],
-                "from_road_block_token": road_block_tokens[i % len(road_block_tokens)]
+                "polygon_token": poly_tokens[i % len(poly_tokens)],
+                "stop_line_type": "TURN_STOP",
+                "ped_crossing_tokens": [],
+                "traffic_light_token": traffic_light_tokens[i] if i < len(traffic_light_tokens) else None,
+                "road_block_token": None
             })
         
         carpark_areas = []
         for i in range(2):
             carpark_areas.append({
                 "token": uuid.uuid4().hex,
-                "polygon_token": poly_tokens[(i+4) % len(poly_tokens)]
+                "polygon_token": poly_tokens[(i+4) % len(poly_tokens)],
+                "orientation": 2.46383638 + i * 0.5,
+                "road_block_token": None
             })
         
         road_dividers = []
         for i in range(2):
-            segments = []
-            for j in range(4):
-                node_idx = (i * 4 + j + 50) % len(node_tokens)
-                segments.append({
-                    "node_token": node_tokens[node_idx],
-                    "segment_type": "SOLID_SINGLE_WHITE"
-                })
             road_dividers.append({
                 "token": uuid.uuid4().hex,
                 "line_token": line_tokens[(i+5) % len(line_tokens)],
-                "road_divider_segments": segments
-            })
-        
-        traffic_lights = []
-        for i in range(2):
-            traffic_lights.append({
-                "token": uuid.uuid4().hex,
-                "line_token": line_tokens[(i+8) % len(line_tokens)],
-                "traffic_light_type": "VERTICAL"
+                "road_segment_token": None
             })
         
         lane_connectors = []
         for i in range(3):
             lane_connectors.append({
                 "token": uuid.uuid4().hex,
-                "from_lane_token": lane_tokens[i % len(lane_tokens)],
-                "to_lane_token": lane_tokens[(i+1) % len(lane_tokens)],
                 "polygon_token": poly_tokens[i % len(poly_tokens)]
             })
         
@@ -799,7 +663,7 @@ class NuScenesWriter(BaseWriter):
         
         stub_data = {
             "version": "1.3",
-            "canvas_edge": [0.0, 0.0, 5000.0, 5000.0],
+            "canvas_edge": [563,400],
             "polygon": polygons,
             "node": nodes,
             "line": lines,
@@ -814,17 +678,14 @@ class NuScenesWriter(BaseWriter):
             "carpark_area": carpark_areas,
             "road_divider": road_dividers,
             "traffic_light": traffic_lights,
-            "traffic_control": traffic_controls,
             "lane_connector": lane_connectors,
             "connectivity": connectivity,
             "arcline_path_3": arcline_path_3
         }
         
         save_json_safely(expansion_path, stub_data)
-        log.info(f"Created map expansion file")
     
     def _write_prediction(self, scenes, samples):
-        """Writes prediction.json with correct token format."""
         if not scenes or not samples:
             return
         
@@ -844,12 +705,9 @@ class NuScenesWriter(BaseWriter):
             predictions.append(f"{prediction_id}_{sample_token}")
         
         prediction_data[formatted_scene_name] = predictions
-        
         save_json_safely(prediction_path, prediction_data)
-        log.info(f"Merged scene '{formatted_scene_name}' into prediction.json")
     
     def _write_file_manifest(self, data: IntermediateData):
-        """Writes file_manifest.json."""
         new_entries = []
         frame_to_sensor_data = {}
         
@@ -888,13 +746,10 @@ class NuScenesWriter(BaseWriter):
                     "source_file": source_file,
                     "output_file": f"samples/{sd.sensor_name}/{output_filename}"
                 })
-            
             new_entries.append(manifest_entry)
-        
         append_to_json_list(os.path.join(self._annot_dir, 'file_manifest.json'), new_entries)
     
     def _write_sample_and_ego_pose(self, samples, ego_poses):
-        """Writes sample.json and ego_pose.json."""
         sample_path = os.path.join(self._annot_dir, 'sample.json')
         ego_pose_path = os.path.join(self._annot_dir, 'ego_pose.json')
         
@@ -919,7 +774,6 @@ class NuScenesWriter(BaseWriter):
         all_samples.sort(key=lambda x: x['timestamp'])
         all_ego_poses.sort(key=lambda x: x['timestamp'])
         
-        # Link prev/next for samples by scene
         scene_tokens = {s['scene_token'] for s in all_samples}
         final_samples = []
         
@@ -933,7 +787,6 @@ class NuScenesWriter(BaseWriter):
         save_json_safely(sample_path, final_samples)
         save_json_safely(ego_pose_path, all_ego_poses)
         
-        # Write scene.json
         if samples:
             raw_scene_name = samples[0].scene_name
             formatted_scene_name = self._format_scene_name(raw_scene_name)
@@ -950,7 +803,6 @@ class NuScenesWriter(BaseWriter):
             append_to_json_list(os.path.join(self._annot_dir, 'scene.json'), [new_scene])
     
     def _write_sample_data(self, sensor_data, sequence_name):
-        """Writes sample_data.json."""
         sample_data_path = os.path.join(self._annot_dir, 'sample_data.json')
         all_sample_data = load_json_safely(sample_data_path, default=[])
         
@@ -979,7 +831,6 @@ class NuScenesWriter(BaseWriter):
                 "is_key_frame": if_data.is_keyframe,
             })
         
-        # Link prev/next by sensor
         sensor_groups = {}
         for sd in all_sample_data:
             token = sd['calibrated_sensor_token']
@@ -996,14 +847,11 @@ class NuScenesWriter(BaseWriter):
             final_sample_data.extend(sorted_list)
         
         save_json_safely(sample_data_path, final_sample_data)
-        log.info(f"Merged and overwrote sample_data.json. Total: {len(final_sample_data)}")
     
     def _write_category(self, instances):
-        """Writes category.json."""
         new_categories = []
         all_category_names = {inst.category_name for inst in instances}
         
-        # Add all categories from token manager
         for name, token in self._token_manager.category_tokens.items():
             new_categories.append({
                 "token": token,
@@ -1011,7 +859,6 @@ class NuScenesWriter(BaseWriter):
                 "description": f"{name} category"
             })
         
-        # Add any new categories from data
         for name in all_category_names:
             if name not in self._token_manager.category_tokens:
                 token = self._token_manager.get_category_token(name)
@@ -1021,14 +868,9 @@ class NuScenesWriter(BaseWriter):
                     "description": f"{name} category"
                 })
         
-        merge_and_overwrite_json_list(
-            os.path.join(self._annot_dir, 'category.json'),
-            new_categories,
-            key_field='name'
-        )
+        merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'category.json'), new_categories, key_field='name')
     
     def _write_instance_and_annotation(self, instances, annotations):
-        """Writes instance.json and sample_annotation.json."""
         instance_path = os.path.join(self._annot_dir, 'instance.json')
         ann_path = os.path.join(self._annot_dir, 'sample_annotation.json')
         
@@ -1036,7 +878,6 @@ class NuScenesWriter(BaseWriter):
         inst_list = load_json_safely(instance_path, default=[])
         inst_db = {i['token']: i for i in inst_list}
         
-        # Group annotations by instance
         new_anns_by_inst = {}
         for ann in annotations:
             if ann.temp_instance_id not in new_anns_by_inst:
@@ -1046,7 +887,6 @@ class NuScenesWriter(BaseWriter):
         inst_name_map = {inst.temp_instance_id: inst.category_name for inst in instances}
         used_category_tokens = {inst['category_token'] for inst in inst_db.values()}
         
-        # Process each instance
         for temp_inst_id, new_anns_list in new_anns_by_inst.items():
             inst_token = self._token_manager.get_instance_token(temp_inst_id)
             new_anns_list.sort(key=lambda x: x.timestamp_us)
@@ -1060,7 +900,6 @@ class NuScenesWriter(BaseWriter):
             for i, if_ann in enumerate(new_anns_list):
                 category_name = inst_name_map.get(temp_inst_id, "")
                 
-                # Add appropriate attributes
                 attribute_tokens = []
                 if category_name.startswith('vehicle.'):
                     attribute_tokens = [self._token_manager.get_attribute_token("vehicle.moving")]
@@ -1076,7 +915,7 @@ class NuScenesWriter(BaseWriter):
                     "sample_token": self._token_manager.get_frame_token(if_ann.temp_frame_id),
                     "instance_token": inst_token,
                     "attribute_tokens": attribute_tokens,
-                    "visibility_token": self._token_manager.get_visibility_token("v4-0"),
+                    "visibility_token": "4",
                     "translation": if_ann.translation,
                     "size": if_ann.size,
                     "rotation": if_ann.rotation,
@@ -1089,7 +928,6 @@ class NuScenesWriter(BaseWriter):
             category_token = self._token_manager.get_category_token(inst_name_map.get(temp_inst_id, ""))
             used_category_tokens.add(category_token)
             
-            # Update or create instance
             if inst_token not in inst_db:
                 inst_db[inst_token] = {
                     "token": inst_token,
@@ -1102,14 +940,9 @@ class NuScenesWriter(BaseWriter):
                 inst_db[inst_token]["nbr_annotations"] += len(generated_tokens)
                 inst_db[inst_token]["last_annotation_token"] = generated_tokens[-1]
         
-        # Create dummy instances for unused categories
-        log.info("Creating dummy instances for unused categories...")
-        dummy_count = 0
-        
         for cat_name, cat_token in self._token_manager.category_tokens.items():
             if cat_token not in used_category_tokens:
                 dummy_instance_token = self._token_manager.get_instance_token(f"dummy_{cat_name}")
-                
                 if dummy_instance_token not in inst_db:
                     inst_db[dummy_instance_token] = {
                         "token": dummy_instance_token,
@@ -1118,27 +951,15 @@ class NuScenesWriter(BaseWriter):
                         "first_annotation_token": dummy_instance_token,
                         "last_annotation_token": dummy_instance_token
                     }
-                    dummy_count += 1
-        
-        if dummy_count > 0:
-            log.info(f"Created {dummy_count} dummy instances for unused categories")
         
         save_json_safely(instance_path, list(inst_db.values()))
         save_json_safely(ann_path, all_anns)
-        log.info(f"Wrote instance.json ({len(inst_db)} instances) and sample_annotation.json ({len(all_anns)} annotations)")
-    
-    # --- File Processing Methods ---
     
     def _process_sensor_files(self, sensor_data, sequence_path, sequence_name):
-        """Converts and copies physical sensor files."""
-        num_lidar = 0
-        num_camera = 0
-        
         for sd in sensor_data:
             timestamp = sd.timestamp_us
             output_filename_base = f"{sequence_name}_frame_{timestamp}"
             
-            # Handle LiDAR files
             if sd.original_filename.endswith('.pcd'):
                 src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
                 output_filename = f"{output_filename_base}.pcd.bin"
@@ -1148,7 +969,6 @@ class NuScenesWriter(BaseWriter):
                 
                 if not os.path.exists(dst_file):
                     convert_lidar_pcd_to_bin(src_file, dst_file)
-                    num_lidar += 1
             
             elif sd.original_filename.endswith('.feather'):
                 src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
@@ -1159,9 +979,8 @@ class NuScenesWriter(BaseWriter):
                 
                 if not os.path.exists(dst_file):
                     convert_lidar_feather_to_bin(src_file, dst_file)
-                    num_lidar += 1
             
-            else:  # Camera file
+            else:  
                 src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
                 output_filename = f"{output_filename_base}.jpg"
                 dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
@@ -1170,36 +989,14 @@ class NuScenesWriter(BaseWriter):
                 
                 if not os.path.exists(dst_file):
                     convert_camera_to_jpg(src_file, dst_file)
-                    num_camera += 1
-        
-        log.info(f"Processed {num_lidar} LiDAR files and {num_camera} camera files")
     
     def _duplicate_sweeps(self):
-        """Duplicates samples directory to sweeps."""
         if os.path.exists(self._sweeps_dir):
             try:
                 shutil.rmtree(self._sweeps_dir)
-            except Exception as e:
-                log.error(f"Could not remove 'sweeps' directory: {e}")
+            except Exception:
                 return
-        
         try:
             shutil.copytree(self._samples_dir, self._sweeps_dir)
-            log.info("Successfully duplicated 'samples' to 'sweeps'")
-        except Exception as e:
-            log.error(f"Could not copy 'samples' to 'sweeps': {e}")
-
-
-# -----------------------------------------------------------------------------
-#  PLACEHOLDER FOR FUTURE WRITERS
-# -----------------------------------------------------------------------------
-
-# class KittiWriter(BaseWriter):
-#     """Writes data to KITTI format."""
-#     def write(self, data: IntermediateData, output_path: str):
-#         pass
-#
-# class WaymoWriter(BaseWriter):
-#     """Writes data to Waymo Open Dataset format."""
-#     def write(self, data: IntermediateData, output_path: str):
-#         pass
+        except Exception:
+            pass

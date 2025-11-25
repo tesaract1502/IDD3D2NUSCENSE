@@ -5,7 +5,7 @@ import os
 import traceback
 
 from readers import Idd3dReader, Argoverse2Reader, BaseReader
-from nuscenes_writer import NuScenesWriter, BaseWriter
+from writers import NuScenesWriter, BaseWriter
 
 SUPPORTED_READERS: dict[str, type[BaseReader]] = {
     "idd3d": Idd3dReader,

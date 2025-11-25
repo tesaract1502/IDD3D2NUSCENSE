@@ -511,15 +511,6 @@ class NuScenesWriter(BaseWriter):
                         "transversal_accel": {"max": -0.312, "max_diff": 0.032, "mean": -0.49, "mean_diff": 0.0, "min": -0.6, "min_diff": -0.028, "std": 0.063, "std_diff": 0.006},
                         "utime": {"max": last_ts, "max_diff": 40353.0, "mean": (first_ts+last_ts)/2, "mean_diff": 10298.1, "min": first_ts, "min_diff": 2620.0, "std": 5648567.4, "std_diff": 2102.8}
                     }
-                },
-                "ZoeSensors": {
-                    "message_count": count, "message_frequency": count/10.0, "timespan": 10.0,
-                    "var_stats": {
-                        "brake_sensor": {"max": 0.201, "max_diff": 0.0003, "mean": 0.172, "mean_diff": 0.0, "min": 0.171, "min_diff": -0.0004, "std": 0.005, "std_diff": 0.00002},
-                        "steering_sensor": {"max": 0.190, "max_diff": 0.0006, "mean": 0.188, "mean_diff": 0.0, "min": 0.187, "min_diff": -0.0005, "std": 0.0003, "std_diff": 0.00006},
-                        "throttle_sensor": {"max": 0.253, "max_diff": 0.0017, "mean": 0.192, "mean_diff": 0.0, "min": 0.120, "min_diff": -0.0016, "std": 0.041, "std_diff": 0.0002},
-                        "utime": {"max": last_ts, "max_diff": 24269.0, "mean": (first_ts+last_ts)/2, "mean_diff": 1050.9, "min": first_ts, "min_diff": 1.0, "std": 5626101.9, "std_diff": 837.4}
-                    }
                 }
             }
             save_json_safely(os.path.join(self._can_bus_dir, f"{formatted_scene_name}_meta.json"), meta_data)

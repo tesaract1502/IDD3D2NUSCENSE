@@ -1,370 +1,106 @@
-import os
-import json
+import argparse
+import sys
 import logging
-import glob
-import re
-from abc import ABC, abstractmethod
-from intermediate_format import *
+import os
+import traceback
 
-try:
-    import pandas as pd
-    import numpy as np
-except ImportError:
-    pass
+from readers import Idd3dReader, Argoverse2Reader, BaseReader
+from writers import NuScenesWriter, BaseWriter
 
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
-log = logging.getLogger(__name__)
+SUPPORTED_READERS: dict[str, type[BaseReader]] = {
+    "idd3d": Idd3dReader,
+    "argoverse2": Argoverse2Reader
+}
 
-class BaseReader(ABC):    
-    @abstractmethod
-    def read(self, sequence_path: str) -> IntermediateData:
-        pass
+SUPPORTED_WRITERS: dict[str, type[BaseWriter]] = {
+    "nuscenes": NuScenesWriter
+}
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert autonomous driving datasets.")
+    parser.add_argument("--reader", required=True, choices=SUPPORTED_READERS.keys(),
+                        help="The input dataset format.")
+    parser.add_argument("--writer", required=True, choices=SUPPORTED_WRITERS.keys(),
+                        help="The output dataset format.")
+    parser.add_argument("--input", required=True,
+                        help="Path to the PARENT directory containing all sequence folders.")
+    parser.add_argument("--output", required=True,
+                        help="Path to the single destination (output) directory.")
     
-    @abstractmethod
-    def validate(self, sequence_path: str) -> dict:
-        pass
+    args = parser.parse_args()
 
-class Idd3dReader(BaseReader):    
-    FRAME_RATE_HZ = 10
-    BASE_TIMESTAMP_US = 1640995200000000  
-    def __init__(self):
-        self.idd3d_to_standard_categories = {
-            'Car': 'vehicle.car',
-            'Truck': 'vehicle.truck',
-            'Bus': 'vehicle.bus',
-            'Motorcycle': 'vehicle.motorcycle',
-            'MotorcyleRider': 'vehicle.motorcycle',
-            'Bicycle': 'vehicle.bicycle',
-            'Person': 'movable_object.pedestrian',
-            'Auto': 'movable_object.van',
-            'Rider': 'movable_object.bicyclerider',
-            'Animal': 'movable_object.unknown',
-            'TrafficLight': 'movable_object.unknown',
-            'TrafficSign': 'movable_object.unknown',
-            'Pole': 'movable_object.unknown',
-            'OtherVehicle': 'movable_object.unknown',
-            'Misc': 'movable_object.unknown'
-        }
-        
-        self.idd3d_to_standard_cameras = {
-            "cam0": "CAM_FRONT_LEFT",
-            "cam1": "CAM_BACK_RIGHT",
-            "cam2": "CAM_FRONT_RIGHT",
-            "cam3": "CAM_FRONT",
-            "cam4": "CAM_BACK_LEFT",
-            "cam5": "CAM_BACK"
-        }
-        
-        self.LIDAR_CHANNEL = "LIDAR_TOP"
-        
-        self.CAMERA_INTRINSIC = [
-            [2916.0, 0.0, 720.0],
-            [0.0, 2916.0, 540.0],
-            [0.0, 0.0, 1.0]
+    logging.basicConfig(
+        level=logging.INFO,
+        format='[%(asctime)s] %(levelname)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.StreamHandler(sys.stdout) 
         ]
+    )
+    log = logging.getLogger(__name__)
 
-    def validate(self, sequence_path: str) -> dict:
-        sequence_path = os.path.abspath(sequence_path)
-        
-        if not os.path.isdir(sequence_path):
-            return {
-                'valid': False,
-                'error': f'Not a directory: {sequence_path}'
-            }
-        
-        annot_json_path = os.path.join(sequence_path, 'annot_data.json')
-        if not os.path.exists(annot_json_path):
-            return {
-                'valid': False,
-                'error': f'Missing annot_data.json in {sequence_path}'
-            }
-        
-        return {
-            'valid': True,
-            'info': {
-                'sequence_name': os.path.basename(sequence_path)
-            }
-        }
+    log.info("=" * 70)
+    log.info(f"Starting Conversion Pipeline")
+    log.info("=" * 70)
+    log.info(f"Reader:     {args.reader}")
+    log.info(f"Writer:     {args.writer}")
+    log.info(f"Input Dir:  {args.input}")
+    log.info(f"Output Dir: {args.output}")
+    log.info("-" * 70)
 
-    def read(self, sequence_path: str) -> IntermediateData:
-        log.info(f"Reading IDD3D sequence: {sequence_path}")
-        
-        validation = self.validate(sequence_path)
-        if not validation['valid']:
-            raise FileNotFoundError(validation['error'])
-        
-        sequence_path = os.path.abspath(sequence_path)
-        sequence_name = os.path.basename(sequence_path)
-        
-        annot_json_path = os.path.join(sequence_path, 'annot_data.json')
-        label_dir = os.path.join(sequence_path, 'label')
-        
-        try:
-            with open(annot_json_path, 'r') as f:
-                annot_data = json.load(f)
-            frame_ids = sorted(annot_data.keys())
-        except Exception as e:
-            raise ValueError(f"Failed to read {annot_json_path}: {e}")
-        
-        data = IntermediateData(sequence_path=sequence_path)
-        
-        data.scenes.append(IFScene(
-            name=sequence_name,
-            description=f"IDD3D sequence {sequence_name}"
-        ))
-        
-        data.calibrations.append(IFCalibration(
-            sensor_name=self.LIDAR_CHANNEL,
-            translation=[0.0, 0.0, 1.8],  
-            rotation=[1.0, 0.0, 0.0, 0.0],  
-            camera_intrinsic=[]
-        ))
-        
-        for standard_cam_name in self.idd3d_to_standard_cameras.values():
-            data.calibrations.append(IFCalibration(
-                sensor_name=standard_cam_name,
-                translation=[0.0, 0.0, 1.6],  
-                rotation=[1.0, 0.0, 0.0, 0.0],  
-                camera_intrinsic=self.CAMERA_INTRINSIC
-            ))
-        
-        frame_interval_us = int(1_000_000 / self.FRAME_RATE_HZ)  
-        instance_tracker = set()  
-        
-        for i, frame_id in enumerate(frame_ids):
-            timestamp = self.BASE_TIMESTAMP_US + (i * frame_interval_us)
-            
-            data.samples.append(IFSample(
-                temp_frame_id=frame_id,
-                timestamp_us=timestamp,
-                scene_name=sequence_name
-            ))
-            
-            data.ego_poses.append(IFEgoPose(
-                temp_frame_id=frame_id,
-                timestamp_us=timestamp,
-                translation=[0.0, 0.0, 0.0],  
-                rotation=[1.0, 0.0, 0.0, 0.0]  
-            ))
-            
-            data.sensor_data.append(IFSensorData(
-                temp_frame_id=frame_id,
-                sensor_name=self.LIDAR_CHANNEL,
-                original_filename=f"{frame_id}.pcd",
-                timestamp_us=timestamp,
-                is_keyframe=True
-            ))
-            
-            for idd_cam, standard_cam in self.idd3d_to_standard_cameras.items():
-                data.sensor_data.append(IFSensorData(
-                    temp_frame_id=frame_id,
-                    sensor_name=standard_cam,
-                    original_filename=f"{idd_cam}/{frame_id}.png",
-                    timestamp_us=timestamp,
-                    is_keyframe=True
-                ))
-            
-            label_path = os.path.join(label_dir, f"{frame_id}.json")
-            if not os.path.exists(label_path):
-                continue
-            
-            try:
-                with open(label_path, 'r') as f:
-                    label_objects = json.load(f)
-                
-                for obj in label_objects:
-                    obj_id = str(obj.get("obj_id"))
-                    obj_type = obj.get("obj_type")
-                    
-                    if not obj_id or not obj_type:
-                        continue
-                    
-                    if obj_id not in instance_tracker:
-                        category_name = self.idd3d_to_standard_categories.get(
-                            obj_type, 
-                            'movable_object.unknown'  
-                        )
-                        
-                        data.instances.append(IFInstance(
-                            temp_instance_id=obj_id,
-                            category_name=category_name
-                        ))
-                        instance_tracker.add(obj_id)
-                    
-                    psr = obj.get("psr", {})
-                    pos = psr.get("position", {})
-                    scl = psr.get("scale", {})
-                    
-                    data.annotations.append(IFAnnotation(
-                        temp_instance_id=obj_id,
-                        temp_frame_id=frame_id,
-                        timestamp_us=timestamp,
-                        translation=[
-                            pos.get("x", 0.0),
-                            pos.get("y", 0.0),
-                            pos.get("z", 0.0)
-                        ],
-                        size=[
-                            scl.get("x", 1.0),
-                            scl.get("y", 1.0),
-                            scl.get("z", 1.0)
-                        ],
-                        rotation=[1.0, 0.0, 0.0, 0.0]
-                    ))
-            
-            except Exception:
-                pass
-        
-        return data
+    if not os.path.isdir(args.input):
+        log.error(f"Input path is not a valid directory: {args.input}")
+        sys.exit(1)
 
-class Argoverse2Reader(BaseReader):
-    def __init__(self):
-        self.av2_to_standard_categories = {
-            "REGULAR_VEHICLE": "vehicle.car",
-            "PEDESTRIAN": "movable_object.pedestrian",
-            "BICYCLIST": "movable_object.bicyclerider",
-            "BICYCLE": "vehicle.bicycle",
-            "BUS": "vehicle.bus",
-            "TRUCK": "vehicle.truck",
-            "TRUCK_CAB": "vehicle.truck",
-            "TRAILER": "vehicle.truck",
-            "LARGE_VEHICLE": "vehicle.truck",
-            "MOTORCYCLIST": "movable_object.motorcycle",
-            "WHEELED_RIDER": "movable_object.bicyclerider",
-            "BOLLARD": "movable_object.barrier",
-            "CONSTRUCTION_CONE": "movable_object.trafficcone",
-            "SIGN": "static_object.traffic_sign",
-            "MPV": "vehicle.car",
-            "VEHICLE": "vehicle.car",
-            "UNKNOWN": "movable_object.unknown"
-        }
+    try:
+        log.info(f"Initializing reader: {args.reader}...")
+        ReaderClass = SUPPORTED_READERS[args.reader]
+        reader = ReaderClass()
 
-    def validate(self, sequence_path: str) -> dict:
-        sequence_path = os.path.abspath(sequence_path)
-        if not os.path.isdir(sequence_path):
-            return {'valid': False, 'error': f'Not a directory: {sequence_path}'}
-        
-        ego_feather = os.path.join(sequence_path, "city_SE3_egovehicle.feather")
-        if not os.path.exists(ego_feather):
-            return {'valid': False, 'error': f'Missing city_SE3_egovehicle.feather in {sequence_path}'}
-            
-        return {'valid': True, 'info': {'sequence_name': os.path.basename(sequence_path)}}
+        log.info(f"Initializing writer: {args.writer}...")
+        WriterClass = SUPPORTED_WRITERS[args.writer]
+        writer = WriterClass()
 
-    def read(self, sequence_path: str) -> IntermediateData:
-        log.info(f"Reading Argoverse 2 sequence: {sequence_path}")
-        sequence_path = os.path.abspath(sequence_path)
-        sequence_name = os.path.basename(sequence_path)
-        data = IntermediateData(sequence_path=sequence_path)
-        
-        data.scenes.append(IFScene(name=sequence_name, description=f"Argoverse 2 sequence {sequence_name}"))
-        
-        ego_path = os.path.join(sequence_path, "city_SE3_egovehicle.feather")
-        ego_df = pd.read_feather(ego_path)
-        ego_df = ego_df.sort_values('timestamp_ns')
-        
-        for _, row in ego_df.iterrows():
-            ts_us = int(row['timestamp_ns'] / 1000)
-            frame_id = str(ts_us) 
-            
-            data.samples.append(IFSample(
-                temp_frame_id=frame_id,
-                timestamp_us=ts_us,
-                scene_name=sequence_name
-            ))
-            
-            data.ego_poses.append(IFEgoPose(
-                temp_frame_id=frame_id,
-                timestamp_us=ts_us,
-                translation=[row['tx_m'], row['ty_m'], row['tz_m']],
-                rotation=[row['qw'], row['qx'], row['qy'], row['qz']]
-            ))
-            
-        calib_path = os.path.join(sequence_path, "calibration", "egovehicle_se3_sensors.feather")
-        int_path = os.path.join(sequence_path, "calibration", "intrinsics.feather")
-        
-        calib_df = pd.read_feather(calib_path)
-        intrinsics_df = pd.read_feather(int_path) if os.path.exists(int_path) else pd.DataFrame()
-        
-        for _, row in calib_df.iterrows():
-            sensor_name = row['sensor_name']
-            
-            cam_intrinsic = []
-            if not intrinsics_df.empty:
-                int_row = intrinsics_df[intrinsics_df['sensor_name'] == sensor_name]
-                if not int_row.empty:
-                    r = int_row.iloc[0]
-                    cam_intrinsic = [
-                        [r['fx_px'], 0.0, r['cx_px']],
-                        [0.0, r['fy_px'], r['cy_px']],
-                        [0.0, 0.0, 1.0]
-                    ]
-            
-            data.calibrations.append(IFCalibration(
-                sensor_name=sensor_name,
-                translation=[row['tx_m'], row['ty_m'], row['tz_m']],
-                rotation=[row['qw'], row['qx'], row['qy'], row['qz']],
-                camera_intrinsic=cam_intrinsic
-            ))
+        sequence_folders_to_process = []
+        for item_name in sorted(os.listdir(args.input)):
+            seq_path = os.path.join(args.input, item_name)
+            if os.path.isdir(seq_path):
+                validation = reader.validate(seq_path)
+                if validation['valid']:
+                    sequence_folders_to_process.append(seq_path)
+                else:
+                    log.warning(f"Skipping '{item_name}': {validation.get('error', 'Invalid sequence')}")
 
-        ann_path = os.path.join(sequence_path, "annotations.feather")
-        if not os.path.exists(ann_path):
-            ann_path = os.path.join(sequence_path, "annotation.feather")
-            
-        if os.path.exists(ann_path):
-            ann_df = pd.read_feather(ann_path)
-            instance_tracker = set()
-            
-            for _, row in ann_df.iterrows():
-                ts_us = int(row['timestamp_ns'] / 1000)
-                track_id = str(row['track_uuid'])
-                category = row['category']
-                
-                if track_id not in instance_tracker:
-                    std_cat = self.av2_to_standard_categories.get(category, "movable_object.unknown")
-                    data.instances.append(IFInstance(
-                        temp_instance_id=track_id,
-                        category_name=std_cat
-                    ))
-                    instance_tracker.add(track_id)
-                
-                num_pts = int(row.get('num_interior_pts', 0))
-                data.annotations.append(IFAnnotation(
-                    temp_instance_id=track_id,
-                    temp_frame_id=str(ts_us),
-                    timestamp_us=ts_us,
-                    translation=[row['tx_m'], row['ty_m'], row['tz_m']],
-                    size=[row['width_m'], row['length_m'], row['height_m']], 
-                    rotation=[row['qw'], row['qx'], row['qy'], row['qz']],
-                    num_lidar_pts=num_pts
-                ))
-
-        sensors_dir = os.path.join(sequence_path, "sensors")
-        target_sensors = [
-            "lidar", "ring_front_left", "ring_front_right", "ring_front_center",
-            "ring_rear_left", "ring_rear_right", "ring_side_left", "ring_side_right",
-            "stereo_front_left", "stereo_front_right"
-        ]
+        if not sequence_folders_to_process:
+            log.error(f"No valid sequence folders found in: {args.input}")
+            sys.exit(1)
         
-        if os.path.exists(sensors_dir):
-            for sensor_name in target_sensors:
-                sensor_path = os.path.join(sensors_dir, sensor_name)
-                if os.path.isdir(sensor_path):
-                    files = glob.glob(os.path.join(sensor_path, "*.jpg")) + \
-                            glob.glob(os.path.join(sensor_path, "*.feather")) + \
-                            glob.glob(os.path.join(sensor_path, "*.pcd"))
-                    
-                    for fpath in files:
-                        fname = os.path.basename(fpath)
-                        match = re.search(r'(\d+)', fname)
-                        if match:
-                            ts_ns = int(match.group(1))
-                            ts_us = int(ts_ns / 1000)
-                            
-                            data.sensor_data.append(IFSensorData(
-                                temp_frame_id=str(ts_us),
-                                sensor_name=sensor_name,
-                                original_filename=f"sensors/{sensor_name}/{fname}",
-                                timestamp_us=ts_us
-                            ))
+        log.info(f"Found {len(sequence_folders_to_process)} sequences to process.")
 
-        return data
+        for i, seq_path in enumerate(sequence_folders_to_process):
+            log.info("=" * 70)
+            log.info(f"Processing sequence {i+1}/{len(sequence_folders_to_process)}: {os.path.basename(seq_path)}")
+            log.info("=" * 70)
+
+            log.info(f"Reading from source path: {seq_path}")
+            intermediate_data = reader.read(seq_path)
+            log.info("Successfully read and parsed source data.")
+
+            log.info(f"Writing to output path: {args.output}")
+            writer.write(intermediate_data, args.output)
+        
+        log.info("=" * 70)
+        log.info("All sequences processed successfully!")
+        log.info("=" * 70)
+        
+    except Exception as e:
+        log.error("=" * 70)
+        log.error("--- A FATAL ERROR OCCURRED ---")
+        log.error(f"Error: {e}")
+        log.error("=" * 70)
+        log.error(traceback.format_exc()) 
+        log.error("Conversion FAILED.")
+        sys.exit(1) 
+
+if __name__ == "__main__":
+    main()

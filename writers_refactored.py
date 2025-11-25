@@ -851,7 +851,7 @@ class NuScenesWriter(BaseWriter):
             for sd in frame_to_sensor_data[frame_id]:
                 offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
                 timestamp = sd.timestamp_us + offset
-                output_filename_base = f"{sequence_name}_frame_{timestamp}"
+                output_filename_base = f"{sequence_name}_frame_{timestamp}_{sd.sensor_name}"
                 
                 if sd.sensor_name.startswith("CAM_"):
                     output_filename = f"{output_filename_base}.jpg"
@@ -931,7 +931,7 @@ class NuScenesWriter(BaseWriter):
             offset = self.SENSOR_OFFSETS.get(if_data.sensor_name, 0)
             timestamp = if_data.timestamp_us + offset
             
-            output_filename_base = f"{sequence_name}_frame_{timestamp}"
+            output_filename_base = f"{sequence_name}_frame_{timestamp}_{if_data.sensor_name}"
             
             if is_camera:
                 output_filename = f"{output_filename_base}.jpg"
@@ -1083,15 +1083,22 @@ class NuScenesWriter(BaseWriter):
             timestamp = sd.timestamp_us + offset
             output_filename_base = f"{sequence_name}_frame_{timestamp}_{sd.sensor_name}"
             
-            src_file = os.path.join(sequence_path, sd.original_filename)
+            possible_paths = [
+                os.path.join(sequence_path, sd.original_filename),
+                os.path.join(sequence_path, "sensors", "cameras", os.path.basename(sd.original_filename)),
+                os.path.join(sequence_path, "sensors", "lidar", os.path.basename(sd.original_filename)),
+                os.path.join(sequence_path, "camera", os.path.basename(sd.original_filename)),
+                os.path.join(sequence_path, "lidar", os.path.basename(sd.original_filename)),
+                os.path.join(sequence_path, "sensors", sd.sensor_name, os.path.basename(sd.original_filename))
+            ]
             
-            if not os.path.exists(src_file):
-                if "CAM" in sd.sensor_name or "ring" in sd.sensor_name or "stereo" in sd.sensor_name:
-                     src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
-                else:
-                     src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
+            src_file = None
+            for p in possible_paths:
+                if os.path.exists(p):
+                    src_file = p
+                    break
             
-            if not os.path.exists(src_file):
+            if not src_file:
                 continue
 
             dst_folder = os.path.join(self._samples_dir, sd.sensor_name)

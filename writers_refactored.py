@@ -236,7 +236,7 @@ class NuScenesWriter(BaseWriter):
     def write(self, data: IntermediateData, output_path: str):
         self._output_path = os.path.abspath(output_path)
         
-        self._annot_dir = os.path.join(self._output_path, 'annotations')
+        self._annot_dir = os.path.join(self._output_path, 'anotations')
         self._samples_dir = os.path.join(self._output_path, 'samples')
         self._sweeps_dir = os.path.join(self._output_path, 'sweeps')
         self._maps_dir = os.path.join(self._output_path, 'maps')
@@ -851,13 +851,14 @@ class NuScenesWriter(BaseWriter):
             for sd in frame_to_sensor_data[frame_id]:
                 offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
                 timestamp = sd.timestamp_us + offset
-                output_filename_base = f"{sequence_name}_frame_{timestamp}_{sd.sensor_name}"
+                output_filename_base = f"{sequence_name}___{os.path.basename(sd.original_filename)}"
                 
                 if sd.sensor_name.startswith("CAM_"):
-                    output_filename = f"{output_filename_base}.jpg"
+                    output_filename = f"{output_filename_base}"
                     source_file = f"{sequence_name}/camera/{sd.original_filename}"
                 else:
-                    output_filename = f"{output_filename_base}.pcd.bin"
+                    filename_no_ext = os.path.splitext(output_filename_base)[0]
+                    output_filename = f"{filename_no_ext}.pcd.bin"
                     source_file = f"{sequence_name}/lidar/{sd.original_filename}"
                 
                 manifest_entry["sensors"].append({
@@ -931,13 +932,14 @@ class NuScenesWriter(BaseWriter):
             offset = self.SENSOR_OFFSETS.get(if_data.sensor_name, 0)
             timestamp = if_data.timestamp_us + offset
             
-            output_filename_base = f"{sequence_name}_frame_{timestamp}_{if_data.sensor_name}"
+            output_filename_base = f"{sequence_name}___{os.path.basename(if_data.original_filename)}"
             
             if is_camera:
-                output_filename = f"{output_filename_base}.jpg"
+                output_filename = output_filename_base 
                 fileformat = "jpg"
             else:
-                output_filename = f"{output_filename_base}.pcd.bin"
+                filename_no_ext = os.path.splitext(output_filename_base)[0]
+                output_filename = f"{filename_no_ext}.pcd.bin"
                 fileformat = "pcd.bin"
             
             all_sample_data.append({
@@ -1081,7 +1083,7 @@ class NuScenesWriter(BaseWriter):
         for sd in sensor_data:
             offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
             timestamp = sd.timestamp_us + offset
-            output_filename_base = f"{sequence_name}_frame_{timestamp}_{sd.sensor_name}"
+            output_filename_base = f"{sequence_name}___{os.path.basename(sd.original_filename)}"
             
             possible_paths = [
                 os.path.join(sequence_path, sd.original_filename),
@@ -1107,7 +1109,8 @@ class NuScenesWriter(BaseWriter):
             ext = os.path.splitext(src_file)[1].lower()
             
             if ext in ['.pcd', '.bin']:
-                output_filename = f"{output_filename_base}.pcd.bin"
+                filename_no_ext = os.path.splitext(output_filename_base)[0]
+                output_filename = f"{filename_no_ext}.pcd.bin"
                 dst_file = os.path.join(dst_folder, output_filename)
                 if not os.path.exists(dst_file):
                     if ext == '.pcd':
@@ -1116,13 +1119,14 @@ class NuScenesWriter(BaseWriter):
                         shutil.copy2(src_file, dst_file)
 
             elif ext == '.feather':
-                output_filename = f"{output_filename_base}.pcd.bin"
+                filename_no_ext = os.path.splitext(output_filename_base)[0]
+                output_filename = f"{filename_no_ext}.pcd.bin"
                 dst_file = os.path.join(dst_folder, output_filename)
                 if not os.path.exists(dst_file):
                     convert_lidar_feather_to_bin(src_file, dst_file)
             
             elif ext in ['.jpg', '.jpeg']:
-                output_filename = f"{output_filename_base}.jpg"
+                output_filename = f"{output_filename_base}"
                 dst_file = os.path.join(dst_folder, output_filename)
                 if not os.path.exists(dst_file):
                     shutil.copy2(src_file, dst_file)

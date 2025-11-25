@@ -236,7 +236,7 @@ class NuScenesWriter(BaseWriter):
     def write(self, data: IntermediateData, output_path: str):
         self._output_path = os.path.abspath(output_path)
         
-        self._annot_dir = os.path.join(self._output_path, 'anotations')
+        self._annot_dir = os.path.join(self._output_path, 'annotations')
         self._samples_dir = os.path.join(self._output_path, 'samples')
         self._sweeps_dir = os.path.join(self._output_path, 'sweeps')
         self._maps_dir = os.path.join(self._output_path, 'maps')
@@ -1081,35 +1081,48 @@ class NuScenesWriter(BaseWriter):
         for sd in sensor_data:
             offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
             timestamp = sd.timestamp_us + offset
-            output_filename_base = f"{sequence_name}_frame_{timestamp}"
+            output_filename_base = f"{sequence_name}_frame_{timestamp}_{sd.sensor_name}"
             
-            if sd.original_filename.endswith('.pcd'):
-                src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
+            src_file = os.path.join(sequence_path, sd.original_filename)
+            
+            if not os.path.exists(src_file):
+                if "CAM" in sd.sensor_name or "ring" in sd.sensor_name or "stereo" in sd.sensor_name:
+                     src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
+                else:
+                     src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
+            
+            if not os.path.exists(src_file):
+                continue
+
+            dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
+            os.makedirs(dst_folder, exist_ok=True)
+
+            ext = os.path.splitext(src_file)[1].lower()
+            
+            if ext in ['.pcd', '.bin']:
                 output_filename = f"{output_filename_base}.pcd.bin"
-                dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
-                os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
-                
                 if not os.path.exists(dst_file):
-                    convert_lidar_pcd_to_bin(src_file, dst_file)
-            
-            elif sd.original_filename.endswith('.feather'):
-                src_file = os.path.join(sequence_path, 'lidar', sd.original_filename)
+                    if ext == '.pcd':
+                        convert_lidar_pcd_to_bin(src_file, dst_file)
+                    else:
+                        shutil.copy2(src_file, dst_file)
+
+            elif ext == '.feather':
                 output_filename = f"{output_filename_base}.pcd.bin"
-                dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
-                os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
-                
                 if not os.path.exists(dst_file):
                     convert_lidar_feather_to_bin(src_file, dst_file)
             
-            else:  
-                src_file = os.path.join(sequence_path, 'camera', sd.original_filename)
+            elif ext in ['.jpg', '.jpeg']:
                 output_filename = f"{output_filename_base}.jpg"
-                dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
-                os.makedirs(dst_folder, exist_ok=True)
                 dst_file = os.path.join(dst_folder, output_filename)
-                
+                if not os.path.exists(dst_file):
+                    shutil.copy2(src_file, dst_file)
+            
+            elif ext == '.png':
+                output_filename = f"{output_filename_base}.jpg"
+                dst_file = os.path.join(dst_folder, output_filename)
                 if not os.path.exists(dst_file):
                     convert_camera_to_jpg(src_file, dst_file)
     

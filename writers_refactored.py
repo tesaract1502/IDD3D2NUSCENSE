@@ -56,14 +56,17 @@ def convert_lidar_feather_to_bin(src_path, dst_path):
 def convert_camera_to_jpg(src_path, dst_path, quality=95):
     try:
         if not os.path.exists(src_path):
-            return
+            log.warning(f"Source image not found: {src_path}")
+            return False
         
         img = Image.open(src_path)
         if img.mode != 'RGB':
             img = img.convert('RGB')
         img.save(dst_path, 'JPEG', quality=quality)
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        log.error(f"Failed to convert image {src_path}: {e}")
+        return False
 
 class BaseWriter(ABC):
     @abstractmethod
@@ -232,9 +235,41 @@ class NuScenesWriter(BaseWriter):
         self._expansion_dir = None
         self._can_bus_dir = None
         self._generated_log_tokens = []
+        self._dataset_type = None
+        self._current_sequence_name = None
+        self._scene_index = 0
+    
+    def _detect_dataset_type(self, data: IntermediateData) -> str:
+        if not data.sensor_data:
+            return "unknown"
+        
+        sample_sensor = data.sensor_data[0].sensor_name
+        
+        if sample_sensor.startswith("CAM_"):
+            return "idd3d"
+        elif sample_sensor in ["lidar", "ring_front_left", "ring_front_right", "ring_front_center", 
+                               "ring_rear_left", "ring_rear_right", "ring_side_left", "ring_side_right",
+                               "stereo_front_left", "stereo_front_right"]:
+            return "argoverse2"
+        
+        return "unknown"
+    
+    def _count_existing_scenes(self):
+        scene_json_path = os.path.join(self._annot_dir, 'scene.json')
+        existing_scenes = load_json_safely(scene_json_path, default=[])
+        return len(existing_scenes)
     
     def write(self, data: IntermediateData, output_path: str):
         self._output_path = os.path.abspath(output_path)
+        self._dataset_type = self._detect_dataset_type(data)
+        
+        if data.scenes:
+            self._current_sequence_name = data.scenes[0].name
+        
+        log.info("=" * 70)
+        log.info(f"Starting conversion for: {self._current_sequence_name}")
+        log.info(f"Dataset type: {self._dataset_type}")
+        log.info("=" * 70)
         
         self._annot_dir = os.path.join(self._output_path, 'anotations')
         self._samples_dir = os.path.join(self._output_path, 'samples')
@@ -255,6 +290,8 @@ class NuScenesWriter(BaseWriter):
         os.makedirs(self._prediction_dir, exist_ok=True)
         os.makedirs(self._expansion_dir, exist_ok=True)
         
+        self._scene_index = self._count_existing_scenes()
+        
         registry_path = os.path.join(self._annot_dir, 'token_registry.json')
         last_timestamp = self._get_last_timestamp()
         new_base_timestamp = (last_timestamp + 1_000_000) if last_timestamp else None
@@ -271,6 +308,7 @@ class NuScenesWriter(BaseWriter):
         
         sequence_name = data.scenes[0].name
         
+        log.info("Generating nuScenes JSON files...")
         self._write_sensor_and_calib(data.calibrations)
         self._write_visibility()
         self._write_attribute()
@@ -284,10 +322,20 @@ class NuScenesWriter(BaseWriter):
         self._write_category(data.instances)
         self._write_instance_and_annotation(data.instances, data.annotations)
         self._write_can_bus(data.scenes, data.samples)
+        log.info("JSON files generated")
         
+        log.info("Converting sensor files...")
         self._process_sensor_files(data.sensor_data, data.sequence_path, sequence_name, new_base_timestamp)
+        
+        log.info("Duplicating samples to sweeps directory...")
         self._duplicate_sweeps()
+        
         self._token_manager.save_registry()
+        
+        log.info("=" * 70)
+        log.info(f"Conversion completed successfully for {sequence_name}")
+        log.info(f"Output directory: {self._output_path}")
+        log.info("=" * 70)
     
     def _get_last_timestamp(self):
         max_timestamp = None
@@ -329,8 +377,7 @@ class NuScenesWriter(BaseWriter):
             num_str = match.group(0)
             return f"scene-{num_str.zfill(3)}"
         else:
-            fallback_hash = hashlib.md5(raw_scene_name.encode()).hexdigest()[:3]
-            return f"scene-{fallback_hash}"
+            return f"scene-{str(self._scene_index).zfill(3)}"
     
     def _write_can_bus(self, scenes, samples):
         if not scenes or not samples:
@@ -531,29 +578,42 @@ class NuScenesWriter(BaseWriter):
                 "channel": if_calib.sensor_name,
             })
             
-            new_calib_sensors.append({
+            calib_entry = {
                 "token": self._token_manager.get_calibration_token(if_calib.sensor_name),
                 "sensor_token": sensor_token,
                 "translation": if_calib.translation,
                 "rotation": if_calib.rotation,
                 "camera_intrinsic": if_calib.camera_intrinsic
-            })
+            }
+            
+            if hasattr(if_calib, 'distortion') and if_calib.distortion:
+                calib_entry["distortion"] = if_calib.distortion
+            else:
+                calib_entry["distortion"] = []
+                
+            if hasattr(if_calib, 'resolution') and if_calib.resolution:
+                calib_entry["resolution"] = if_calib.resolution
+            else:
+                calib_entry["resolution"] = []
+            
+            new_calib_sensors.append(calib_entry)
         
         merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'sensor.json'), new_sensors, key_field='channel')
         merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'calibrated_sensor.json'), new_calib_sensors, key_field='sensor_token')
     
     def _write_visibility(self):
         vis_levels = [
-            {"token": "1", "level": "v1-0", "description": "visibility 0-40%"},
-            {"token": "2", "level": "v2-0", "description": "visibility 40-60%"},
-            {"token": "3", "level": "v3-0", "description": "visibility 60-80%"},
-            {"token": "4", "level": "v4-0", "description": "visibility 80-100%"}
+            {"token": "1", "level": "v0-40", "description": "Poor visibility (0-40%)"},
+            {"token": "2", "level": "v40-60", "description": "Partial visibility (40-60%)"},
+            {"token": "3", "level": "v60-80", "description": "Good visibility (60-80%)"},
+            {"token": "4", "level": "v80-100", "description": "Excellent visibility (80-100%)"}
         ]
         merge_and_overwrite_json_list(os.path.join(self._annot_dir, 'visibility.json'), vis_levels, key_field='level')
     
     def _write_attribute(self):
         attributes = [
             {"name": "vehicle.moving", "description": "Vehicle is moving"},
+            {"name": "vehicle.stopped", "description": "Vehicle is stopped"},
             {"name": "pedestrian.moving", "description": "Pedestrian is moving"},
         ]
         new_entries = []
@@ -825,9 +885,10 @@ class NuScenesWriter(BaseWriter):
                 frame_to_sensor_data[sd.temp_frame_id] = []
             frame_to_sensor_data[sd.temp_frame_id].append(sd)
         
+        sequence_name = data.scenes[0].name if data.scenes else "unknown"
+        
         for if_sample in data.samples:
             frame_id = if_sample.temp_frame_id
-            sequence_name = if_sample.scene_name
             
             manifest_entry = {
                 "frame_id": frame_id,
@@ -842,20 +903,28 @@ class NuScenesWriter(BaseWriter):
             for sd in frame_to_sensor_data[frame_id]:
                 offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
                 timestamp = sd.timestamp_us + offset
-                output_filename_base = f"{sequence_name}___{os.path.basename(sd.original_filename)}"
                 
-                if sd.sensor_name.startswith("CAM_"):
-                    output_filename = f"{output_filename_base}"
-                    source_file = f"{sequence_name}/camera/{sd.original_filename}"
+                if self._dataset_type == "argoverse2":
+                    output_sensor_name = "LIDAR_TOP" if sd.sensor_name == "lidar" else sd.sensor_name
+                    scene_number = str(self._scene_index).zfill(3)
+                    
+                    if sd.sensor_name in ["ring_front_left", "ring_front_right", "ring_front_center",
+                                          "ring_rear_left", "ring_rear_right", "ring_side_left", 
+                                          "ring_side_right", "stereo_front_left", "stereo_front_right"]:
+                        output_filename = f"seq-{scene_number}_{timestamp}.jpg"
+                    else:
+                        output_filename = f"seq-{scene_number}_{timestamp}.pcd.bin"
                 else:
-                    filename_no_ext = os.path.splitext(output_filename_base)[0]
-                    output_filename = f"{filename_no_ext}.pcd.bin"
-                    source_file = f"{sequence_name}/lidar/{sd.original_filename}"
+                    output_sensor_name = sd.sensor_name
+                    if sd.sensor_name.startswith("CAM_"):
+                        output_filename = f"{sequence_name}_{timestamp}_{sd.sensor_name}.jpg"
+                    else:
+                        output_filename = f"{sequence_name}_{timestamp}_{sd.sensor_name}.pcd.bin"
                 
                 manifest_entry["sensors"].append({
                     "channel": sd.sensor_name,
-                    "source_file": source_file,
-                    "output_file": f"samples/{sd.sensor_name}/{output_filename}"
+                    "source_file": sd.original_filename,
+                    "output_file": f"samples/{output_sensor_name}/{output_filename}"
                 })
             new_entries.append(manifest_entry)
         append_to_json_list(os.path.join(self._annot_dir, 'file_manifest.json'), new_entries)
@@ -917,31 +986,50 @@ class NuScenesWriter(BaseWriter):
         sample_data_path = os.path.join(self._annot_dir, 'sample_data.json')
         all_sample_data = load_json_safely(sample_data_path, default=[])
         
+        if self._dataset_type == "argoverse2":
+            cam_width = 1550
+            cam_height = 2048
+        else:
+            cam_width = 1440
+            cam_height = 1080
+        
         for if_data in sensor_data:
-            is_camera = if_data.sensor_name.startswith("CAM_")
+            is_camera = if_data.sensor_name.startswith("CAM_") or \
+                       if_data.sensor_name in ["ring_front_left", "ring_front_right", "ring_front_center",
+                                              "ring_rear_left", "ring_rear_right", "ring_side_left", 
+                                              "ring_side_right", "stereo_front_left", "stereo_front_right"]
             
             offset = self.SENSOR_OFFSETS.get(if_data.sensor_name, 0)
             timestamp = if_data.timestamp_us + offset
             
-            output_filename_base = f"{sequence_name}___{os.path.basename(if_data.original_filename)}"
-            
-            if is_camera:
-                output_filename = output_filename_base 
-                fileformat = "jpg"
+            if self._dataset_type == "argoverse2":
+                output_sensor_name = "LIDAR_TOP" if if_data.sensor_name == "lidar" else if_data.sensor_name
+                scene_number = str(self._scene_index).zfill(3)
+                
+                if is_camera:
+                    output_filename = f"seq-{scene_number}_{timestamp}.jpg"
+                    fileformat = "jpg"
+                else:
+                    output_filename = f"seq-{scene_number}_{timestamp}.pcd.bin"
+                    fileformat = "pcd.bin"
             else:
-                filename_no_ext = os.path.splitext(output_filename_base)[0]
-                output_filename = f"{filename_no_ext}.pcd.bin"
-                fileformat = "pcd.bin"
+                output_sensor_name = if_data.sensor_name
+                if is_camera:
+                    output_filename = f"{sequence_name}_{timestamp}_{if_data.sensor_name}.jpg"
+                    fileformat = "jpg"
+                else:
+                    output_filename = f"{sequence_name}_{timestamp}_{if_data.sensor_name}.pcd.bin"
+                    fileformat = "pcd.bin"
             
             all_sample_data.append({
                 "token": uuid.uuid4().hex,
                 "sample_token": self._token_manager.get_frame_token(if_data.temp_frame_id),
                 "ego_pose_token": self._token_manager.get_ego_pose_token(if_data.temp_frame_id),
                 "calibrated_sensor_token": self._token_manager.get_calibration_token(if_data.sensor_name),
-                "filename": f"samples/{if_data.sensor_name}/{output_filename}",
+                "filename": f"samples/{output_sensor_name}/{output_filename}",
                 "fileformat": fileformat,
-                "width": 1440 if is_camera else 0,
-                "height": 1080 if is_camera else 0,
+                "width": cam_width if is_camera else 0,
+                "height": cam_height if is_camera else 0,
                 "timestamp": timestamp,
                 "is_key_frame": if_data.is_keyframe,
             })
@@ -1071,62 +1159,200 @@ class NuScenesWriter(BaseWriter):
         save_json_safely(ann_path, all_anns)
     
     def _process_sensor_files(self, sensor_data, sequence_path, sequence_name, base_timestamp):
+        if self._dataset_type == "argoverse2":
+            self._process_argoverse2_files(sensor_data, sequence_path, sequence_name, base_timestamp)
+        else:
+            self._process_idd3d_files(sensor_data, sequence_path, sequence_name, base_timestamp)
+    
+    def _process_idd3d_files(self, sensor_data, sequence_path, sequence_name, base_timestamp):
+        sensor_groups = {}
         for sd in sensor_data:
-            offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
-            timestamp = sd.timestamp_us + offset
-            output_filename_base = f"{sequence_name}___{os.path.basename(sd.original_filename)}"
+            if sd.sensor_name not in sensor_groups:
+                sensor_groups[sd.sensor_name] = []
+            sensor_groups[sd.sensor_name].append(sd)
+        
+        for sensor_name, sensor_files in sensor_groups.items():
+            total_files = len(sensor_files)
+            converted = 0
+            failed = 0
             
-            possible_paths = [
-                os.path.join(sequence_path, sd.original_filename),
-                os.path.join(sequence_path, "sensors", "cameras", os.path.basename(sd.original_filename)),
-                os.path.join(sequence_path, "sensors", "lidar", os.path.basename(sd.original_filename)),
-                os.path.join(sequence_path, "camera", os.path.basename(sd.original_filename)),
-                os.path.join(sequence_path, "lidar", os.path.basename(sd.original_filename)),
-                os.path.join(sequence_path, "sensors", sd.sensor_name, os.path.basename(sd.original_filename))
-            ]
+            log.info(f"Processing {sensor_name}: {total_files} files")
             
-            src_file = None
-            for p in possible_paths:
-                if os.path.exists(p):
-                    src_file = p
-                    break
-            
-            if not src_file:
-                continue
-
-            dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
-            os.makedirs(dst_folder, exist_ok=True)
-
-            ext = os.path.splitext(src_file)[1].lower()
-            
-            if ext in ['.pcd', '.bin']:
-                filename_no_ext = os.path.splitext(output_filename_base)[0]
-                output_filename = f"{filename_no_ext}.pcd.bin"
-                dst_file = os.path.join(dst_folder, output_filename)
-                if not os.path.exists(dst_file):
-                    if ext == '.pcd':
-                        convert_lidar_pcd_to_bin(src_file, dst_file)
+            for idx, sd in enumerate(sensor_files, 1):
+                offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
+                timestamp = sd.timestamp_us + offset
+                
+                possible_paths = []
+                
+                if sd.sensor_name.startswith("CAM_"):
+                    cam_match = re.match(r'(cam\d+)/(.*)', sd.original_filename)
+                    if cam_match:
+                        cam_name = cam_match.group(1)
+                        file_name = cam_match.group(2)
+                        possible_paths.extend([
+                            os.path.join(sequence_path, "camera", cam_name, file_name),
+                            os.path.join(sequence_path, cam_name, file_name),
+                            os.path.join(sequence_path, sd.original_filename)
+                        ])
                     else:
-                        shutil.copy2(src_file, dst_file)
+                        possible_paths.append(os.path.join(sequence_path, sd.original_filename))
+                else:
+                    base_filename = os.path.basename(sd.original_filename)
+                    possible_paths.extend([
+                        os.path.join(sequence_path, "lidar", base_filename),
+                        os.path.join(sequence_path, sd.original_filename),
+                        os.path.join(sequence_path, base_filename)
+                    ])
+                
+                src_file = None
+                for p in possible_paths:
+                    if os.path.exists(p):
+                        src_file = p
+                        break
+                
+                if not src_file:
+                    log.warning(f"{sensor_name}: File not found - {sd.original_filename}")
+                    failed += 1
+                    continue
 
-            elif ext == '.feather':
-                filename_no_ext = os.path.splitext(output_filename_base)[0]
-                output_filename = f"{filename_no_ext}.pcd.bin"
-                dst_file = os.path.join(dst_folder, output_filename)
-                if not os.path.exists(dst_file):
-                    convert_lidar_feather_to_bin(src_file, dst_file)
+                dst_folder = os.path.join(self._samples_dir, sd.sensor_name)
+                os.makedirs(dst_folder, exist_ok=True)
+
+                ext = os.path.splitext(src_file)[1].lower()
+                
+                if ext == '.png':
+                    output_filename = f"{sequence_name}_{timestamp}_{sd.sensor_name}.jpg"
+                    dst_file = os.path.join(dst_folder, output_filename)
+                    if not os.path.exists(dst_file):
+                        success = convert_camera_to_jpg(src_file, dst_file)
+                        if success:
+                            converted += 1
+                        else:
+                            failed += 1
+                    else:
+                        converted += 1
+                        
+                elif ext in ['.pcd', '.bin']:
+                    output_filename = f"{sequence_name}_{timestamp}_{sd.sensor_name}.pcd.bin"
+                    dst_file = os.path.join(dst_folder, output_filename)
+                    if not os.path.exists(dst_file):
+                        if ext == '.pcd':
+                            convert_lidar_pcd_to_bin(src_file, dst_file)
+                        else:
+                            shutil.copy2(src_file, dst_file)
+                        converted += 1
+                    else:
+                        converted += 1
+                
+                if idx % 10 == 0 or idx == total_files:
+                    print(f"\r  {sensor_name}: {idx}/{total_files} files processed", end='', flush=True)
             
-            elif ext in ['.jpg', '.jpeg']:
-                output_filename = f"{output_filename_base}"
-                dst_file = os.path.join(dst_folder, output_filename)
-                if not os.path.exists(dst_file):
-                    shutil.copy2(src_file, dst_file)
+            print()
+            if failed > 0:
+                log.warning(f"  {sensor_name}: {converted} converted, {failed} failed")
+            else:
+                log.info(f"  {sensor_name}: {converted} files converted")
+    
+    def _process_argoverse2_files(self, sensor_data, sequence_path, sequence_name, base_timestamp):
+        sensor_groups = {}
+        for sd in sensor_data:
+            if sd.sensor_name not in sensor_groups:
+                sensor_groups[sd.sensor_name] = []
+            sensor_groups[sd.sensor_name].append(sd)
+        
+        scene_number = str(self._scene_index).zfill(3)
+        
+        for sensor_name, sensor_files in sensor_groups.items():
+            total_files = len(sensor_files)
+            converted = 0
+            failed = 0
             
-            elif ext == '.png':
-                output_filename = f"{output_filename_base}.jpg"
-                dst_file = os.path.join(dst_folder, output_filename)
-                if not os.path.exists(dst_file):
-                    convert_camera_to_jpg(src_file, dst_file)
+            output_sensor_name = "LIDAR_TOP" if sensor_name == "lidar" else sensor_name
+            
+            log.info(f"Processing {sensor_name} -> {output_sensor_name}: {total_files} files")
+            
+            for idx, sd in enumerate(sensor_files, 1):
+                offset = self.SENSOR_OFFSETS.get(sd.sensor_name, 0)
+                timestamp = sd.timestamp_us + offset
+                
+                base_filename = os.path.basename(sd.original_filename)
+                
+                if sensor_name == "lidar":
+                    possible_paths = [
+                        os.path.join(sequence_path, sd.original_filename),
+                        os.path.join(sequence_path, "sensors", "lidar", base_filename)
+                    ]
+                else:
+                    possible_paths = [
+                        os.path.join(sequence_path, sd.original_filename),
+                        os.path.join(sequence_path, "sensors", "cameras", sensor_name, base_filename)
+                    ]
+                
+                src_file = None
+                for p in possible_paths:
+                    if os.path.exists(p):
+                        src_file = p
+                        break
+                
+                if not src_file:
+                    failed += 1
+                    continue
+
+                dst_folder = os.path.join(self._samples_dir, output_sensor_name)
+                os.makedirs(dst_folder, exist_ok=True)
+
+                ext = os.path.splitext(src_file)[1].lower()
+                
+                if ext in ['.jpg', '.jpeg']:
+                    output_filename = f"seq-{scene_number}_{timestamp}.jpg"
+                    dst_file = os.path.join(dst_folder, output_filename)
+                    if not os.path.exists(dst_file):
+                        shutil.copy2(src_file, dst_file)
+                        converted += 1
+                    else:
+                        converted += 1
+                
+                elif ext == '.png':
+                    output_filename = f"seq-{scene_number}_{timestamp}.jpg"
+                    dst_file = os.path.join(dst_folder, output_filename)
+                    if not os.path.exists(dst_file):
+                        success = convert_camera_to_jpg(src_file, dst_file)
+                        if success:
+                            converted += 1
+                        else:
+                            failed += 1
+                    else:
+                        converted += 1
+                
+                elif ext == '.feather':
+                    output_filename = f"seq-{scene_number}_{timestamp}.pcd.bin"
+                    dst_file = os.path.join(dst_folder, output_filename)
+                    if not os.path.exists(dst_file):
+                        convert_lidar_feather_to_bin(src_file, dst_file)
+                        converted += 1
+                    else:
+                        converted += 1
+                
+                elif ext in ['.pcd', '.bin']:
+                    output_filename = f"seq-{scene_number}_{timestamp}.pcd.bin"
+                    dst_file = os.path.join(dst_folder, output_filename)
+                    if not os.path.exists(dst_file):
+                        if ext == '.pcd':
+                            convert_lidar_pcd_to_bin(src_file, dst_file)
+                        else:
+                            shutil.copy2(src_file, dst_file)
+                        converted += 1
+                    else:
+                        converted += 1
+                
+                if idx % 10 == 0 or idx == total_files:
+                    print(f"\r  {output_sensor_name}: {idx}/{total_files} files processed", end='', flush=True)
+            
+            print()
+            if failed > 0:
+                log.warning(f"  {output_sensor_name}: {converted} converted, {failed} failed")
+            else:
+                log.info(f"  {output_sensor_name}: {converted} files converted")
     
     def _duplicate_sweeps(self):
         if os.path.exists(self._sweeps_dir):
@@ -1136,5 +1362,6 @@ class NuScenesWriter(BaseWriter):
                 return
         try:
             shutil.copytree(self._samples_dir, self._sweeps_dir)
-        except Exception:
-            pass
+            log.info("Duplicated samples to sweeps directory")
+        except Exception as e:
+            log.error(f"Failed to duplicate sweeps: {e}")

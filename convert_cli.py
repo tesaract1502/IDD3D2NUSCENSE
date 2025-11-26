@@ -90,6 +90,10 @@ def main():
             writer.write(intermediate_data, args.output)
         
         log.info("=" * 70)
+        log.info("Finalizing conversion...")
+        writer.finalize()
+        
+        log.info("=" * 70)
         log.info("All sequences processed successfully!")
         log.info("=" * 70)
         

@@ -72,6 +72,9 @@ class BaseWriter(ABC):
     @abstractmethod
     def write(self, data: IntermediateData, output_path: str):
         pass
+    
+    def finalize(self):
+        pass
 
 class _NuScenesTokenManager:
     
@@ -326,9 +329,6 @@ class NuScenesWriter(BaseWriter):
         
         log.info("Converting sensor files...")
         self._process_sensor_files(data.sensor_data, data.sequence_path, sequence_name, new_base_timestamp)
-        
-        log.info("Duplicating samples to sweeps directory...")
-        self._duplicate_sweeps()
         
         self._token_manager.save_registry()
         
@@ -1365,3 +1365,9 @@ class NuScenesWriter(BaseWriter):
             log.info("Duplicated samples to sweeps directory")
         except Exception as e:
             log.error(f"Failed to duplicate sweeps: {e}")
+    
+    def finalize(self):
+        if self._samples_dir and self._sweeps_dir and os.path.exists(self._samples_dir):
+            log.info("Finalizing: Duplicating samples to sweeps directory...")
+            self._duplicate_sweeps()
+            log.info("Finalization complete")

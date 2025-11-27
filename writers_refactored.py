@@ -241,6 +241,10 @@ class NuScenesWriter(BaseWriter):
         self._dataset_type = None
         self._current_sequence_name = None
         self._scene_index = 0
+        
+        # IDD3D-specific: Timestamp management for multi-sequence support
+        self._frame_index_map = {}  # Map frame_id -> sequential index (0, 1, 2, ...)
+        self._current_base_timestamp = 1640995200000000  # Base timestamp in microseconds
     
     def _detect_dataset_type(self, data: IntermediateData) -> str:
         if not data.sensor_data:
@@ -261,6 +265,36 @@ class NuScenesWriter(BaseWriter):
         scene_json_path = os.path.join(self._annot_dir, 'scene.json')
         existing_scenes = load_json_safely(scene_json_path, default=[])
         return len(existing_scenes)
+    
+    def _build_frame_index_map(self, samples):
+        """
+        Build a mapping from frame_id to sequential index (0, 1, 2, ...).
+        This is used for IDD3D to calculate unique timestamps per frame.
+        """
+        self._frame_index_map = {}
+        sorted_samples = sorted(samples, key=lambda x: x.timestamp_us)
+        for idx, sample in enumerate(sorted_samples):
+            self._frame_index_map[sample.temp_frame_id] = idx
+    
+    def _get_idd3d_adjusted_timestamp(self, frame_id, sensor_name=None):
+        """
+        Calculate adjusted timestamp for IDD3D frame.
+        
+        Each frame gets: base_timestamp + (frame_index * 100,000)
+        Each sensor gets an additional offset for synchronization.
+        
+        This ensures unique timestamps across all sequences.
+        """
+        FRAME_INTERVAL_US = 100000  # 100ms = 100,000 microseconds (10Hz)
+        
+        frame_index = self._frame_index_map.get(frame_id, 0)
+        timestamp = self._current_base_timestamp + (frame_index * FRAME_INTERVAL_US)
+        
+        # Add sensor-specific offset if provided
+        if sensor_name:
+            timestamp += self.SENSOR_OFFSETS.get(sensor_name, 0)
+        
+        return timestamp
     
     def write(self, data: IntermediateData, output_path: str):
         self._output_path = os.path.abspath(output_path)
@@ -298,6 +332,21 @@ class NuScenesWriter(BaseWriter):
         registry_path = os.path.join(self._annot_dir, 'token_registry.json')
         last_timestamp = self._get_last_timestamp()
         new_base_timestamp = (last_timestamp + 1_000_000) if last_timestamp else None
+        
+        # IDD3D-specific: Set up timestamp management for unique timestamps across sequences
+        if self._dataset_type == "idd3d":
+            if last_timestamp:
+                # Subsequent sequence: start after last timestamp + 1 second gap
+                self._current_base_timestamp = last_timestamp + 1_000_000
+            else:
+                # First sequence: use default base timestamp
+                self._current_base_timestamp = 1640995200000000
+            
+            # Build frame index map for this sequence
+            self._build_frame_index_map(data.samples)
+            
+            log.info(f"IDD3D: Base timestamp for this sequence: {self._current_base_timestamp}")
+            log.info(f"IDD3D: Frame count: {len(self._frame_index_map)}")
         
         self._token_manager = _NuScenesTokenManager(
             registry_path=registry_path,
@@ -937,16 +986,28 @@ class NuScenesWriter(BaseWriter):
         all_ego_poses = load_json_safely(ego_pose_path, default=[])
         
         for if_sample in samples:
+            # IDD3D: Use adjusted timestamp; Argoverse2: Use original timestamp
+            if self._dataset_type == "idd3d":
+                ts = self._get_idd3d_adjusted_timestamp(if_sample.temp_frame_id)
+            else:
+                ts = if_sample.timestamp_us
+            
             all_samples.append({
                 "token": self._token_manager.get_frame_token(if_sample.temp_frame_id),
-                "timestamp": if_sample.timestamp_us,
+                "timestamp": ts,
                 "scene_token": self._token_manager.get_scene_token()
             })
         
         for if_pose in ego_poses:
+            # IDD3D: Use adjusted timestamp; Argoverse2: Use original timestamp
+            if self._dataset_type == "idd3d":
+                ts = self._get_idd3d_adjusted_timestamp(if_pose.temp_frame_id)
+            else:
+                ts = if_pose.timestamp_us
+            
             all_ego_poses.append({
                 "token": self._token_manager.get_ego_pose_token(if_pose.temp_frame_id),
-                "timestamp": if_pose.timestamp_us,
+                "timestamp": ts,
                 "translation": if_pose.translation,
                 "rotation": if_pose.rotation
             })
@@ -999,8 +1060,12 @@ class NuScenesWriter(BaseWriter):
                                               "ring_rear_left", "ring_rear_right", "ring_side_left", 
                                               "ring_side_right", "stereo_front_left", "stereo_front_right"]
             
-            offset = self.SENSOR_OFFSETS.get(if_data.sensor_name, 0)
-            timestamp = if_data.timestamp_us + offset
+            # IDD3D: Use adjusted timestamp; Argoverse2: Use original with sensor offset
+            if self._dataset_type == "idd3d":
+                timestamp = self._get_idd3d_adjusted_timestamp(if_data.temp_frame_id, if_data.sensor_name)
+            else:
+                offset = self.SENSOR_OFFSETS.get(if_data.sensor_name, 0)
+                timestamp = if_data.timestamp_us + offset
             
             if self._dataset_type == "argoverse2":
                 output_sensor_name = "LIDAR_TOP" if if_data.sensor_name == "lidar" else if_data.sensor_name

@@ -250,15 +250,29 @@ class NuScenesWriter(BaseWriter):
         if not data.sensor_data:
             return "unknown"
         
-        sample_sensor = data.sensor_data[0].sensor_name
+        # Check all sensor names to determine dataset type
+        sensor_names = {sd.sensor_name for sd in data.sensor_data}
         
-        if sample_sensor.startswith("CAM_"):
+        # IDD3D uses: LIDAR_TOP, CAM_FRONT, CAM_FRONT_LEFT, CAM_FRONT_RIGHT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT
+        idd3d_sensors = {"LIDAR_TOP", "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT", 
+                         "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT"}
+        
+        # Argoverse2 uses: lidar, ring_front_left, ring_front_right, etc.
+        argoverse2_sensors = {"lidar", "ring_front_left", "ring_front_right", "ring_front_center",
+                              "ring_rear_left", "ring_rear_right", "ring_side_left", "ring_side_right",
+                              "stereo_front_left", "stereo_front_right"}
+        
+        # Check for IDD3D
+        if sensor_names & idd3d_sensors:  # If there's any intersection
+            log.info(f"Detected dataset type: idd3d (sensors: {sensor_names & idd3d_sensors})")
             return "idd3d"
-        elif sample_sensor in ["lidar", "ring_front_left", "ring_front_right", "ring_front_center", 
-                               "ring_rear_left", "ring_rear_right", "ring_side_left", "ring_side_right",
-                               "stereo_front_left", "stereo_front_right"]:
+        
+        # Check for Argoverse2
+        if sensor_names & argoverse2_sensors:  # If there's any intersection
+            log.info(f"Detected dataset type: argoverse2 (sensors: {sensor_names & argoverse2_sensors})")
             return "argoverse2"
         
+        log.warning(f"Unknown dataset type. Sensors found: {sensor_names}")
         return "unknown"
     
     def _count_existing_scenes(self):
@@ -335,12 +349,15 @@ class NuScenesWriter(BaseWriter):
         
         # IDD3D-specific: Set up timestamp management for unique timestamps across sequences
         if self._dataset_type == "idd3d":
+            log.info(f"DEBUG: IDD3D mode - last_timestamp from files: {last_timestamp}")
             if last_timestamp:
                 # Subsequent sequence: start after last timestamp + 1 second gap
                 self._current_base_timestamp = last_timestamp + 1_000_000
+                log.info(f"DEBUG: Using last_timestamp + 1,000,000 = {self._current_base_timestamp}")
             else:
                 # First sequence: use default base timestamp
                 self._current_base_timestamp = 1640995200000000
+                log.info(f"DEBUG: No existing data, using default base: {self._current_base_timestamp}")
             
             # Build frame index map for this sequence
             self._build_frame_index_map(data.samples)
@@ -390,29 +407,39 @@ class NuScenesWriter(BaseWriter):
         max_timestamp = None
         
         sample_json_path = os.path.join(self._annot_dir, 'sample.json')
+        log.info(f"DEBUG: Checking for existing sample.json at: {sample_json_path}")
         if os.path.exists(sample_json_path):
             samples = load_json_safely(sample_json_path, default=[])
+            log.info(f"DEBUG: Found {len(samples) if samples else 0} samples in sample.json")
             if samples and isinstance(samples, list):
                 sample_timestamps = [s.get('timestamp') for s in samples if s.get('timestamp')]
                 if sample_timestamps:
                     max_timestamp = max(sample_timestamps) if max_timestamp is None else max(max_timestamp, max(sample_timestamps))
+                    log.info(f"DEBUG: Max timestamp from sample.json: {max_timestamp}")
+        else:
+            log.info("DEBUG: sample.json does not exist yet")
         
         ego_pose_json_path = os.path.join(self._annot_dir, 'ego_pose.json')
         if os.path.exists(ego_pose_json_path):
             ego_poses = load_json_safely(ego_pose_json_path, default=[])
+            log.info(f"DEBUG: Found {len(ego_poses) if ego_poses else 0} ego poses in ego_pose.json")
             if ego_poses and isinstance(ego_poses, list):
                 ego_timestamps = [e.get('timestamp') for e in ego_poses if e.get('timestamp')]
                 if ego_timestamps:
                     max_timestamp = max(ego_timestamps) if max_timestamp is None else max(max_timestamp, max(ego_timestamps))
+                    log.info(f"DEBUG: Max timestamp from ego_pose.json: {max_timestamp}")
         
         sample_data_json_path = os.path.join(self._annot_dir, 'sample_data.json')
         if os.path.exists(sample_data_json_path):
             sample_data = load_json_safely(sample_data_json_path, default=[])
+            log.info(f"DEBUG: Found {len(sample_data) if sample_data else 0} entries in sample_data.json")
             if sample_data and isinstance(sample_data, list):
                 sd_timestamps = [sd.get('timestamp') for sd in sample_data if sd.get('timestamp')]
                 if sd_timestamps:
                     max_timestamp = max(sd_timestamps) if max_timestamp is None else max(max_timestamp, max(sd_timestamps))
+                    log.info(f"DEBUG: Max timestamp from sample_data.json: {max_timestamp}")
         
+        log.info(f"DEBUG: Final max_timestamp returned: {max_timestamp}")
         return max_timestamp
     
     def _pre_populate_categories(self):
@@ -989,6 +1016,9 @@ class NuScenesWriter(BaseWriter):
             # IDD3D: Use adjusted timestamp; Argoverse2: Use original timestamp
             if self._dataset_type == "idd3d":
                 ts = self._get_idd3d_adjusted_timestamp(if_sample.temp_frame_id)
+                # Debug: Log first few timestamps
+                if len(all_samples) < 3:
+                    log.info(f"DEBUG _write_sample_and_ego_pose (sample): frame_id={if_sample.temp_frame_id}, adjusted_timestamp={ts}")
             else:
                 ts = if_sample.timestamp_us
             
@@ -1002,6 +1032,9 @@ class NuScenesWriter(BaseWriter):
             # IDD3D: Use adjusted timestamp; Argoverse2: Use original timestamp
             if self._dataset_type == "idd3d":
                 ts = self._get_idd3d_adjusted_timestamp(if_pose.temp_frame_id)
+                # Debug: Log first few timestamps
+                if len(all_ego_poses) < 3:
+                    log.info(f"DEBUG _write_sample_and_ego_pose (ego_pose): frame_id={if_pose.temp_frame_id}, adjusted_timestamp={ts}")
             else:
                 ts = if_pose.timestamp_us
             
@@ -1063,6 +1096,9 @@ class NuScenesWriter(BaseWriter):
             # IDD3D: Use adjusted timestamp; Argoverse2: Use original with sensor offset
             if self._dataset_type == "idd3d":
                 timestamp = self._get_idd3d_adjusted_timestamp(if_data.temp_frame_id, if_data.sensor_name)
+                # Debug: Log first few timestamps
+                if len(all_sample_data) < 3:
+                    log.info(f"DEBUG _write_sample_data: frame_id={if_data.temp_frame_id}, sensor={if_data.sensor_name}, adjusted_timestamp={timestamp}")
             else:
                 offset = self.SENSOR_OFFSETS.get(if_data.sensor_name, 0)
                 timestamp = if_data.timestamp_us + offset
